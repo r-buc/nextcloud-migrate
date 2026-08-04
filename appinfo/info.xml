@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+    <id>nextcloud_migrate</id>
+    <name>Nextcloud Migrate</name>
+    <summary>Migrate files 1:1 to a remote Nextcloud instance</summary>
+    <description><![CDATA[
+Admin-driven tool to push a user's files and folder structure to a remote
+Nextcloud instance over WebDAV. Supports dry-run analysis, resumable
+background transfer, and per-file verification. v1 scope covers file
+content, folder structure, and modification time only.
+    ]]></description>
+    <version>0.1.0</version>
+    <licence>agpl</licence>
+    <author>Nextcloud Migrate Contributors</author>
+    <namespace>NextcloudMigrate</namespace>
+    <category>files</category>
+    <bugs>https://github.com/example/nextcloud_migrate/issues</bugs>
+    <dependencies>
+        <php min-version="8.1" max-version="8.3"/>
+        <nextcloud min-version="27" max-version="31"/>
+    </dependencies>
+    <background-jobs>
+        <job>OCA\NextcloudMigrate\BackgroundJob\DiscoveryJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\FinalizeJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\CleanupLocksJob</job>
+    </background-jobs>
+    <settings>
+        <admin>OCA\NextcloudMigrate\Settings\AdminSettings</admin>
+        <admin-section>OCA\NextcloudMigrate\Settings\AdminSection</admin-section>
+    </settings>
+</info>

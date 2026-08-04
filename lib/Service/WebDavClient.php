@@ -1,0 +1,412 @@
+<?php
+
+declare(strict_types=1);
+
+namespace OCA\NextcloudMigrate\Service;
+
+use OCA\NextcloudMigrate\Db\RemoteInstance;
+use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
+use OCA\NextcloudMigrate\Exception\TransferException;
+use OCP\Http\Client\IClientService;
+use Psr\Log\LoggerInterface;
+
+/**
+ * Thin WebDAV client for talking to the TARGET Nextcloud instance.
+ *
+ * This app runs on the SOURCE instance (push mode), so the source side of a
+ * migration is read directly off local storage via the Files API
+ * (see DiscoveryService/TransferService). The target instance is only ever
+ * reachable over the network, hence this WebDAV wrapper.
+ */
+class WebDavClient {
+	private const REQUEST_TIMEOUT = 60;
+
+	public function __construct(
+		private IClientService $clientService,
+		private LoggerInterface $logger,
+	) {
+	}
+
+	/**
+	 * Verifies the target is reachable and the credentials are valid by
+	 * issuing a shallow PROPFIND against the user's DAV root.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function testConnection(RemoteInstance $instance, string $appPassword): void {
+		$this->propfind($instance, $appPassword, '', 0);
+	}
+
+	/**
+	 * @return array{size:int,etag:?string,checksum:?string}|null null if the
+	 *         remote path does not exist
+	 * @throws RemoteConnectionException
+	 */
+	public function stat(RemoteInstance $instance, string $appPassword, string $path): ?array {
+		try {
+			$props = $this->propfind($instance, $appPassword, $path, 0);
+		} catch (RemoteConnectionException $e) {
+			if ($e->getCode() === 404) {
+				return null;
+			}
+			throw $e;
+		}
+
+		return $props;
+	}
+
+	/**
+	 * Creates a remote collection (folder). Idempotent: an existing folder
+	 * (405 Method Not Allowed) is treated as success.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function makeCollection(RemoteInstance $instance, string $appPassword, string $path): void {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUri($instance, $path);
+
+		try {
+			$client->request('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			// 405 = already exists, treat as success for idempotent folder creation.
+			if ($status === 405) {
+				return;
+			}
+			throw new RemoteConnectionException("Failed to create remote folder '{$path}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+	}
+
+	/**
+	 * Streams a local resource to the target path via PUT. Preserves mtime
+	 * via the X-OC-MTime header and, when available, asks the server to
+	 * validate content integrity via the OC-Checksum header.
+	 *
+	 * @param resource $stream
+	 * @throws TransferException
+	 */
+	public function putFile(
+		RemoteInstance $instance,
+		string $appPassword,
+		string $path,
+		$stream,
+		int $size,
+		int $mtime,
+		?string $sha256 = null,
+	): void {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUri($instance, $path);
+
+		$headers = [
+			'X-OC-MTime' => (string)$mtime,
+			'Content-Length' => (string)$size,
+		];
+		if ($sha256 !== null) {
+			$headers['OC-Checksum'] = 'SHA256:' . $sha256;
+		}
+
+		$options = $this->baseOptions($instance, $appPassword);
+		$options['headers'] = array_merge($options['headers'], $headers);
+		$options['body'] = $stream;
+		// Large-file transfers must not be capped by the default client timeout.
+		$options['timeout'] = max(self::REQUEST_TIMEOUT, (int)ceil($size / (1024 * 1024)) * 2);
+
+		try {
+			$client->request('PUT', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
+			throw new TransferException("Upload failed for '{$path}': " . $e->getMessage(), $retryable, $e);
+		}
+	}
+
+	/**
+	 * Creates the server-side staging collection for a chunked upload
+	 * (NG Chunking v2 - the same protocol used by the official Nextcloud
+	 * desktop and mobile clients). Idempotent: an already-existing
+	 * collection (405) from a previous, interrupted attempt is reused as-is
+	 * so already-uploaded chunks are preserved for resume.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function startChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUploadUri($instance, $transferId, '');
+
+		try {
+			$client->request('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			if ($status === 405) {
+				return;
+			}
+			throw new RemoteConnectionException('Failed to start chunked upload: ' . $e->getMessage(), $status ?? 0, $e);
+		}
+	}
+
+	/**
+	 * Uploads a single chunk. Chunk indexes are zero-padded so the server
+	 * assembles them in the correct byte order regardless of upload order.
+	 *
+	 * @param resource $chunkStream
+	 * @throws TransferException
+	 */
+	public function uploadChunk(
+		RemoteInstance $instance,
+		string $appPassword,
+		string $transferId,
+		int $chunkIndex,
+		$chunkStream,
+		int $chunkSize,
+	): void {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUploadUri($instance, $transferId, sprintf('%015d', $chunkIndex));
+
+		$options = $this->baseOptions($instance, $appPassword);
+		$options['headers']['Content-Length'] = (string)$chunkSize;
+		$options['body'] = $chunkStream;
+		$options['timeout'] = max(self::REQUEST_TIMEOUT, (int)ceil($chunkSize / (1024 * 1024)) * 2);
+
+		try {
+			$client->request('PUT', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
+			throw new TransferException("Chunk {$chunkIndex} upload failed: " . $e->getMessage(), $retryable, $e);
+		}
+	}
+
+	/**
+	 * Checks which chunk indexes have already been fully received by the
+	 * server for a given transfer, so a resumed transfer can skip them
+	 * instead of re-uploading from scratch.
+	 *
+	 * @return int[] sorted list of chunk indexes present on the server
+	 * @throws RemoteConnectionException
+	 */
+	public function listUploadedChunks(RemoteInstance $instance, string $appPassword, string $transferId): array {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUploadUri($instance, $transferId, '');
+
+		$options = $this->baseOptions($instance, $appPassword);
+		$options['headers']['Depth'] = '1';
+		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
+		$options['body'] = '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/></d:prop></d:propfind>';
+
+		try {
+			$response = $client->request('PROPFIND', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			if ($status === 404) {
+				// Staging collection doesn't exist (yet): nothing uploaded.
+				return [];
+			}
+			throw new RemoteConnectionException('Failed to list uploaded chunks: ' . $e->getMessage(), $status ?? 0, $e);
+		}
+
+		$indexes = [];
+		try {
+			$doc = new \SimpleXMLElement((string)$response->getBody());
+			$doc->registerXPathNamespace('d', 'DAV:');
+			foreach ($doc->xpath('//d:response/d:href') as $href) {
+				$segments = explode('/', rtrim((string)$href, '/'));
+				$last = end($segments);
+				if (ctype_digit($last)) {
+					$indexes[] = (int)$last;
+				}
+			}
+		} catch (\Exception $e) {
+			$this->logger->warning('Failed to parse chunk listing response', ['exception' => $e]);
+		}
+
+		sort($indexes);
+
+		return $indexes;
+	}
+
+	/**
+	 * Finalizes a chunked upload by MOVEing the assembled staging collection
+	 * onto the destination path. The server concatenates chunks by index
+	 * order. Preserves mtime and validates integrity the same way a
+	 * single-shot PUT does.
+	 *
+	 * @throws TransferException
+	 */
+	public function assembleChunkedUpload(
+		RemoteInstance $instance,
+		string $appPassword,
+		string $transferId,
+		string $destinationPath,
+		int $totalSize,
+		int $mtime,
+		?string $sha256 = null,
+	): void {
+		$client = $this->clientService->newClient();
+		$sourceUri = $this->buildUploadUri($instance, $transferId, '.file');
+		$destinationUri = $this->buildUri($instance, $destinationPath);
+
+		$options = $this->baseOptions($instance, $appPassword);
+		$options['headers']['Destination'] = $destinationUri;
+		$options['headers']['X-OC-MTime'] = (string)$mtime;
+		$options['headers']['OC-Total-Length'] = (string)$totalSize;
+		$options['headers']['Overwrite'] = 'T';
+		if ($sha256 !== null) {
+			$options['headers']['OC-Checksum'] = 'SHA256:' . $sha256;
+		}
+
+		try {
+			$client->request('MOVE', $sourceUri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
+			throw new TransferException('Failed to assemble chunked upload: ' . $e->getMessage(), $retryable, $e);
+		}
+	}
+
+	/**
+	 * Best-effort cleanup of a chunked upload's staging collection, e.g.
+	 * after a file is permanently abandoned (retries exhausted).
+	 */
+	public function abortChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
+		try {
+			$client = $this->clientService->newClient();
+			$uri = $this->buildUploadUri($instance, $transferId, '');
+			$client->request('DELETE', $uri, $this->baseOptions($instance, $appPassword));
+		} catch (\Exception $e) {
+			$this->logger->debug('Failed to clean up abandoned chunked upload (non-fatal)', ['exception' => $e]);
+		}
+	}
+
+	private function buildUploadUri(RemoteInstance $instance, string $transferId, string $suffix): string {
+		$base = rtrim($instance->getUrl(), '/');
+		$user = rawurlencode($instance->getTargetUserId());
+		$path = 'remote.php/dav/uploads/' . $user . '/' . rawurlencode($transferId);
+		if ($suffix !== '') {
+			$path .= '/' . $suffix;
+		}
+
+		return "{$base}/{$path}";
+	}
+
+	/**
+	 * Downloads a remote file's content solely to compute a checksum for
+	 * verification (used as a fallback when the server does not echo back an
+	 * OC-Checksum header).
+	 *
+	 * @throws TransferException
+	 */
+	public function fetchSha256(RemoteInstance $instance, string $appPassword, string $path): string {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUri($instance, $path);
+
+		try {
+			$response = $client->get($uri, $this->baseOptions($instance, $appPassword));
+		} catch (\Exception $e) {
+			throw new TransferException("Download for verification failed for '{$path}': " . $e->getMessage(), true, $e);
+		}
+
+		return hash('sha256', $response->getBody());
+	}
+
+	/**
+	 * @return array{size:int,etag:?string,checksum:?string}
+	 * @throws RemoteConnectionException
+	 */
+	private function propfind(RemoteInstance $instance, string $appPassword, string $path, int $depth): array {
+		$client = $this->clientService->newClient();
+		$uri = $this->buildUri($instance, $path);
+
+		$body = <<<XML
+<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:prop>
+    <d:getcontentlength/>
+    <d:getetag/>
+    <oc:checksums/>
+    <oc:size/>
+  </d:prop>
+</d:propfind>
+XML;
+
+		$options = $this->baseOptions($instance, $appPassword);
+		$options['headers']['Depth'] = (string)$depth;
+		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
+		$options['body'] = $body;
+
+		try {
+			$response = $client->request('PROPFIND', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			throw new RemoteConnectionException("PROPFIND failed for '{$path}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+
+		return $this->parsePropfindResponse((string)$response->getBody());
+	}
+
+	/**
+	 * @return array{size:int,etag:?string,checksum:?string}
+	 */
+	private function parsePropfindResponse(string $xml): array {
+		$size = 0;
+		$etag = null;
+		$checksum = null;
+
+		try {
+			$doc = new \SimpleXMLElement($xml);
+			$doc->registerXPathNamespace('d', 'DAV:');
+			$doc->registerXPathNamespace('oc', 'http://owncloud.org/ns');
+
+			$sizeNodes = $doc->xpath('//d:prop/d:getcontentlength');
+			if (!empty($sizeNodes)) {
+				$size = (int)(string)$sizeNodes[0];
+			}
+
+			$etagNodes = $doc->xpath('//d:prop/d:getetag');
+			if (!empty($etagNodes)) {
+				$etag = trim((string)$etagNodes[0], '"');
+			}
+
+			$checksumNodes = $doc->xpath('//d:prop/oc:checksums/oc:checksum');
+			if (!empty($checksumNodes)) {
+				foreach ($checksumNodes as $node) {
+					if (str_starts_with((string)$node, 'SHA256:')) {
+						$checksum = substr((string)$node, strlen('SHA256:'));
+						break;
+					}
+				}
+			}
+		} catch (\Exception $e) {
+			$this->logger->warning('Failed to parse PROPFIND response', ['exception' => $e]);
+		}
+
+		return ['size' => $size, 'etag' => $etag, 'checksum' => $checksum];
+	}
+
+	private function buildUri(RemoteInstance $instance, string $path): string {
+		$base = rtrim($instance->getUrl(), '/');
+		$user = rawurlencode($instance->getTargetUserId());
+		$encodedPath = implode('/', array_map('rawurlencode', explode('/', ltrim($path, '/'))));
+
+		return "{$base}/remote.php/dav/files/{$user}/{$encodedPath}";
+	}
+
+	/**
+	 * @return array{headers: array<string,string>, auth: array{0:string,1:string}, verify: bool}
+	 */
+	private function baseOptions(RemoteInstance $instance, string $appPassword): array {
+		return [
+			'headers' => [],
+			'auth' => [$instance->getTargetUserId(), $appPassword],
+			'verify' => !$instance->getAllowSelfSigned(),
+			'timeout' => self::REQUEST_TIMEOUT,
+		];
+	}
+
+	private function statusFromException(\Exception $e): ?int {
+		if (method_exists($e, 'getResponse') && $e->getResponse() !== null) {
+			return $e->getResponse()->getStatusCode();
+		}
+
+		return null;
+	}
+}
