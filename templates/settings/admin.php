@@ -6,57 +6,72 @@
 		comments, favorites, versions, and encrypted files are not migrated.
 	</p>
 
-	<section id="ncm-instances">
-		<h3>Target instances</h3>
-		<table class="ncm-table" id="ncm-instances-table">
-			<thead>
-				<tr><th>Label</th><th>URL</th><th>Target user</th><th>Last tested</th><th></th></tr>
-			</thead>
-			<tbody></tbody>
-		</table>
+	<section id="ncm-instance">
+		<h3>Target instance</h3>
+		<p id="ncm-instance-status" class="settings-hint"></p>
 
-		<form id="ncm-create-instance-form" class="ncm-form">
-			<h4>Add target instance</h4>
-			<input type="text" name="label" placeholder="Label (e.g. Backup instance)" required>
-			<input type="url" name="url" placeholder="https://target.example.com" required>
-			<input type="text" name="targetUserId" placeholder="Target username" required>
-			<input type="password" name="appPassword" placeholder="Target app password" required>
-			<label><input type="checkbox" name="allowSelfSigned"> Allow self-signed certificate</label>
-			<button type="submit">Add instance</button>
+		<form id="ncm-instance-form">
+			<p>
+				<label for="ncm-instance-label">Label</label>
+				<input type="text" id="ncm-instance-label" name="label" placeholder="e.g. Backup instance">
+			</p>
+			<p>
+				<label for="ncm-instance-url">Target URL</label>
+				<input type="url" id="ncm-instance-url" name="url" placeholder="https://target.example.com" required>
+			</p>
+			<p>
+				<label for="ncm-instance-user">Target username</label>
+				<input type="text" id="ncm-instance-user" name="targetUserId" required>
+			</p>
+			<p>
+				<label for="ncm-instance-password">Target app password</label>
+				<input type="password" id="ncm-instance-password" name="appPassword" required>
+			</p>
+			<p>
+				<label for="ncm-instance-selfsigned">Allow self-signed certificate</label>
+				<input type="checkbox" id="ncm-instance-selfsigned" name="allowSelfSigned">
+			</p>
+			<p>
+				<button type="submit">Save target instance</button>
+				<button type="button" id="ncm-instance-test">Test connection</button>
+				<button type="button" id="ncm-instance-delete">Remove</button>
+			</p>
 		</form>
 	</section>
 
-	<section id="ncm-runs">
-		<h3>Migration runs</h3>
-		<table class="ncm-table" id="ncm-runs-table">
-			<thead>
-				<tr><th>ID</th><th>Instance</th><th>State</th><th>Progress</th><th>Created</th><th></th></tr>
-			</thead>
-			<tbody></tbody>
-		</table>
+	<section id="ncm-run">
+		<h3>Migration run</h3>
 
-		<form id="ncm-create-run-form" class="ncm-form">
-			<h4>Create migration run</h4>
-			<select name="instanceId" id="ncm-run-instance-select" required></select>
-			<select name="collisionStrategy" required>
-				<option value="rename">Rename on collision (default)</option>
-				<option value="skip">Skip on collision</option>
-				<option value="overwrite">Overwrite on collision</option>
-			</select>
-			<textarea name="userMappings" placeholder="sourceUser1:targetUser1&#10;sourceUser2:targetUser2" rows="4" required></textarea>
+		<form id="ncm-create-run-form">
+			<p>
+				<label for="ncm-run-collision">Collision strategy</label>
+				<select id="ncm-run-collision" name="collisionStrategy" required>
+					<option value="rename">Rename on collision (default)</option>
+					<option value="skip">Skip on collision</option>
+					<option value="overwrite">Overwrite on collision</option>
+				</select>
+			</p>
+			<p>
+				<label for="ncm-run-mappings">User mappings</label>
+				<textarea id="ncm-run-mappings" name="userMappings" placeholder="sourceUser1:targetUser1&#10;sourceUser2:targetUser2" rows="4" required></textarea>
+			</p>
 			<p class="settings-hint">One mapping per line, format <code>sourceUser:targetUser</code>.</p>
-			<button type="submit">Create run</button>
+			<p>
+				<button type="submit">Start migration</button>
+			</p>
 		</form>
-	</section>
 
-	<section id="ncm-run-detail" hidden>
-		<h3>Run detail</h3>
-		<pre id="ncm-run-detail-content"></pre>
-		<button id="ncm-run-dry-run">Start dry run</button>
-		<button id="ncm-run-approve">Approve &amp; start transfer</button>
-		<button id="ncm-run-pause">Pause</button>
-		<button id="ncm-run-resume">Resume</button>
-		<button id="ncm-run-cancel">Cancel</button>
-		<button id="ncm-run-refresh">Refresh</button>
+		<div id="ncm-run-detail" hidden>
+			<pre id="ncm-run-detail-content"></pre>
+			<p>
+				<button id="ncm-run-dry-run">Start dry run</button>
+				<button id="ncm-run-approve">Approve &amp; start transfer</button>
+				<button id="ncm-run-pause">Pause</button>
+				<button id="ncm-run-resume">Resume</button>
+				<button id="ncm-run-cancel">Cancel</button>
+				<button id="ncm-run-refresh">Refresh</button>
+				<button id="ncm-run-new">Start a new run</button>
+			</p>
+		</div>
 	</section>
 </div>

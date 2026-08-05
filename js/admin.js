@@ -3,6 +3,7 @@
 	'use strict';
 
 	const apiBase = OC.generateUrl('/apps/nextcloud_migrate/api/v1');
+	let currentInstanceId = null;
 	let selectedRunId = null;
 
 	function apiFetch(path, options) {
@@ -26,107 +27,42 @@
 		});
 	}
 
-	function el(tag, attrs, children) {
-		const node = document.createElement(tag);
-		Object.keys(attrs || {}).forEach(function (key) {
-			if (key === 'text') {
-				node.textContent = attrs[key];
-			} else {
-				node.setAttribute(key, attrs[key]);
-			}
-		});
-		(children || []).forEach(function (child) {
-			node.appendChild(child);
-		});
-		return node;
-	}
+	// --- Target instance (v1 supports exactly one per admin) ---
 
-	function loadInstances() {
+	function loadInstance() {
 		return apiFetch('/instances').then(function (instances) {
-			const tbody = document.querySelector('#ncm-instances-table tbody');
-			tbody.innerHTML = '';
-			const select = document.getElementById('ncm-run-instance-select');
-			select.innerHTML = '';
+			const instance = instances[0] || null;
+			const form = document.getElementById('ncm-instance-form');
+			const status = document.getElementById('ncm-instance-status');
+			const deleteBtn = document.getElementById('ncm-instance-delete');
+			const testBtn = document.getElementById('ncm-instance-test');
 
-			instances.forEach(function (instance) {
+			if (instance) {
+				currentInstanceId = instance.id;
+				form.label.value = instance.label || '';
+				form.url.value = instance.url;
+				form.targetUserId.value = instance.targetUserId;
+				form.appPassword.value = '';
+				form.allowSelfSigned.checked = !!instance.allowSelfSigned;
+
 				const tested = instance.lastTestedAt
 					? new Date(instance.lastTestedAt * 1000).toLocaleString()
 					: 'never';
-				const testBtn = el('button', { text: 'Test' });
-				testBtn.addEventListener('click', function () {
-					apiFetch('/instances/' + instance.id + '/test', { method: 'POST' })
-						.then(function () {
-							return loadInstances();
-						})
-						.catch(function (e) {
-							OC.Notification.showTemporary('Connection test failed: ' + e.message);
-						});
-				});
-				const deleteBtn = el('button', { text: 'Delete' });
-				deleteBtn.addEventListener('click', function () {
-					apiFetch('/instances/' + instance.id, { method: 'DELETE' })
-						.then(loadInstances)
-						.catch(function (e) {
-							OC.Notification.showTemporary('Delete failed: ' + e.message);
-						});
-				});
-
-				tbody.appendChild(el('tr', {}, [
-					el('td', { text: instance.label || '(no label)' }),
-					el('td', { text: instance.url }),
-					el('td', { text: instance.targetUserId }),
-					el('td', { text: tested + (instance.lastTestError ? ' - ' + instance.lastTestError : '') }),
-					el('td', {}, [testBtn, deleteBtn]),
-				]));
-
-				select.appendChild(el('option', { value: instance.id, text: instance.label || instance.url }));
-			});
+				status.textContent = 'Configured: ' + instance.url + ' (' + instance.targetUserId + '). Last tested: ' + tested
+					+ (instance.lastTestError ? ' - ' + instance.lastTestError : '');
+				deleteBtn.hidden = false;
+				testBtn.hidden = false;
+			} else {
+				currentInstanceId = null;
+				form.reset();
+				status.textContent = 'No target instance configured yet.';
+				deleteBtn.hidden = true;
+				testBtn.hidden = true;
+			}
 		});
 	}
 
-	function loadRuns() {
-		return apiFetch('/runs').then(function (runs) {
-			const tbody = document.querySelector('#ncm-runs-table tbody');
-			tbody.innerHTML = '';
-
-			runs.forEach(function (run) {
-				const progress = run.totalFiles > 0
-					? Math.round((run.verifiedFiles / run.totalFiles) * 100) + '%'
-					: '-';
-				const viewBtn = el('button', { text: 'View' });
-				viewBtn.addEventListener('click', function () {
-					showRunDetail(run.id);
-				});
-
-				tbody.appendChild(el('tr', {}, [
-					el('td', { text: String(run.id) }),
-					el('td', { text: String(run.instanceId) }),
-					el('td', { text: run.state }),
-					el('td', { text: progress }),
-					el('td', { text: new Date(run.createdAt * 1000).toLocaleString() }),
-					el('td', {}, [viewBtn]),
-				]));
-			});
-		});
-	}
-
-	function showRunDetail(runId) {
-		selectedRunId = runId;
-		const section = document.getElementById('ncm-run-detail');
-		section.hidden = false;
-		refreshRunDetail();
-	}
-
-	function refreshRunDetail() {
-		if (!selectedRunId) {
-			return;
-		}
-		apiFetch('/runs/' + selectedRunId + '/status').then(function (status) {
-			document.getElementById('ncm-run-detail-content').textContent = JSON.stringify(status, null, 2);
-		});
-	}
-
-	document.getElementById('ncm-create-instance-form').addEventListener('submit', function (event) {
+	document.getElementById('ncm-instance-form').addEventListener('submit', function (event) {
 		event.preventDefault();
 		const form = event.target;
 		apiFetch('/instances', {
@@ -138,13 +74,66 @@
 				appPassword: form.appPassword.value,
 				allowSelfSigned: form.allowSelfSigned.checked,
 			}),
-		}).then(function () {
-			form.reset();
-			return loadInstances();
-		}).catch(function (e) {
-			OC.Notification.showTemporary('Failed to add instance: ' + e.message);
+		}).then(loadInstance).catch(function (e) {
+			OC.Notification.showTemporary('Failed to save target instance: ' + e.message);
 		});
 	});
+
+	document.getElementById('ncm-instance-test').addEventListener('click', function () {
+		if (!currentInstanceId) {
+			return;
+		}
+		apiFetch('/instances/' + currentInstanceId + '/test', { method: 'POST' })
+			.then(loadInstance)
+			.catch(function (e) {
+				OC.Notification.showTemporary('Connection test failed: ' + e.message);
+			});
+	});
+
+	document.getElementById('ncm-instance-delete').addEventListener('click', function () {
+		if (!currentInstanceId) {
+			return;
+		}
+		apiFetch('/instances/' + currentInstanceId, { method: 'DELETE' })
+			.then(loadInstance)
+			.catch(function (e) {
+				OC.Notification.showTemporary('Failed to remove target instance: ' + e.message);
+			});
+	});
+
+	// --- Migration run (v1 shows only the current/latest run) ---
+
+	function showCreateForm() {
+		selectedRunId = null;
+		document.getElementById('ncm-create-run-form').hidden = false;
+		document.getElementById('ncm-run-detail').hidden = true;
+	}
+
+	function showRunDetail(runId) {
+		selectedRunId = runId;
+		document.getElementById('ncm-create-run-form').hidden = true;
+		document.getElementById('ncm-run-detail').hidden = false;
+		refreshRunDetail();
+	}
+
+	function loadCurrentRun() {
+		return apiFetch('/runs').then(function (runs) {
+			if (runs.length > 0) {
+				showRunDetail(runs[0].id);
+			} else {
+				showCreateForm();
+			}
+		});
+	}
+
+	function refreshRunDetail() {
+		if (!selectedRunId) {
+			return;
+		}
+		apiFetch('/runs/' + selectedRunId + '/status').then(function (status) {
+			document.getElementById('ncm-run-detail-content').textContent = JSON.stringify(status, null, 2);
+		});
+	}
 
 	document.getElementById('ncm-create-run-form').addEventListener('submit', function (event) {
 		event.preventDefault();
@@ -162,15 +151,12 @@
 		apiFetch('/runs', {
 			method: 'POST',
 			body: JSON.stringify({
-				instanceId: parseInt(form.instanceId.value, 10),
 				collisionStrategy: form.collisionStrategy.value,
 				userMappings: userMappings,
 			}),
 		}).then(function (run) {
 			form.reset();
-			return loadRuns().then(function () {
-				showRunDetail(run.id);
-			});
+			showRunDetail(run.id);
 		}).catch(function (e) {
 			OC.Notification.showTemporary('Failed to create run: ' + e.message);
 		});
@@ -182,9 +168,7 @@
 				return;
 			}
 			apiFetch('/runs/' + selectedRunId + '/' + action, { method: 'POST' })
-				.then(function () {
-					return Promise.all([refreshRunDetail(), loadRuns()]);
-				})
+				.then(refreshRunDetail)
 				.catch(function (e) {
 					OC.Notification.showTemporary('Action failed: ' + e.message);
 				});
@@ -192,7 +176,9 @@
 	});
 
 	document.getElementById('ncm-run-refresh').addEventListener('click', refreshRunDetail);
+	document.getElementById('ncm-run-new').addEventListener('click', showCreateForm);
 
-	loadInstances();
-	loadRuns();
+	loadInstance();
+	loadCurrentRun();
 }());
+

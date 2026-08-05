@@ -49,23 +49,32 @@ class MigrationController extends Controller {
 		return new JSONResponse($instances);
 	}
 
+	/**
+	 * Creates or updates the admin's single target instance (v1 only
+	 * supports one target per admin - re-submitting this form replaces the
+	 * existing configuration rather than adding another one).
+	 */
 	public function createInstance(string $label, string $url, string $targetUserId, string $appPassword, bool $allowSelfSigned = false): JSONResponse {
 		if (!preg_match('#^https://#i', $url) && !($allowSelfSigned && preg_match('#^http://#i', $url))) {
 			return new JSONResponse(['error' => 'Target URL must use HTTPS'], Http::STATUS_BAD_REQUEST);
 		}
 
-		$instance = new RemoteInstance();
-		$instance->setUuid(UuidGenerator::v4());
+		$existing = $this->instanceMapper->findAllForOwner($this->currentUserId());
+		$instance = $existing[0] ?? new RemoteInstance();
+		$isNew = $instance->getId() === null;
+		if ($isNew) {
+			$instance->setUuid(UuidGenerator::v4());
+			$instance->setCreatedBy($this->currentUserId());
+			$instance->setCreatedAt(time());
+		}
 		$instance->setLabel($label);
 		$instance->setUrl(rtrim($url, '/'));
 		$instance->setTargetUserId($targetUserId);
 		$instance->setAppPasswordEncrypted($this->credentialService->encrypt($appPassword));
 		$instance->setAllowSelfSigned($allowSelfSigned);
-		$instance->setCreatedBy($this->currentUserId());
-		$instance->setCreatedAt(time());
-		$instance = $this->instanceMapper->insert($instance);
+		$instance = $isNew ? $this->instanceMapper->insert($instance) : $this->instanceMapper->update($instance);
 
-		return new JSONResponse($instance, Http::STATUS_CREATED);
+		return new JSONResponse($instance, $isNew ? Http::STATUS_CREATED : Http::STATUS_OK);
 	}
 
 	public function testInstance(int $instanceId): JSONResponse {
@@ -116,16 +125,16 @@ class MigrationController extends Controller {
 	}
 
 	/**
+	 * Creates a migration run against the admin's single configured target
+	 * instance (v1 only supports one target, so there is no instanceId
+	 * parameter to pick from a list).
+	 *
 	 * @param array<string,string> $userMappings sourceUserId => targetUserId
 	 */
-	public function createRun(int $instanceId, string $collisionStrategy, array $userMappings): JSONResponse {
-		try {
-			$instance = $this->ownedInstance($instanceId);
-		} catch (DoesNotExistException) {
-			return new JSONResponse(['error' => 'Target instance not found'], Http::STATUS_NOT_FOUND);
-		}
-		if ($instance === null) {
-			return new JSONResponse(['error' => 'Target instance not found'], Http::STATUS_NOT_FOUND);
+	public function createRun(string $collisionStrategy, array $userMappings): JSONResponse {
+		$instances = $this->instanceMapper->findAllForOwner($this->currentUserId());
+		if ($instances === []) {
+			return new JSONResponse(['error' => 'Configure a target instance before starting a migration'], Http::STATUS_BAD_REQUEST);
 		}
 
 		if ($userMappings === []) {
@@ -133,7 +142,7 @@ class MigrationController extends Controller {
 		}
 
 		try {
-			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instanceId, $collisionStrategy, $userMappings);
+			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings);
 		} catch (\InvalidArgumentException $e) {
 			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_REQUEST);
 		}
