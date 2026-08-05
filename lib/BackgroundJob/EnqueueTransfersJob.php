@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace OCA\NextcloudMigrate\BackgroundJob;
 
 use OCA\NextcloudMigrate\Db\MigrationRun;
+use OCA\NextcloudMigrate\Db\UserMap;
+use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -14,15 +16,20 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
 use Psr\Log\LoggerInterface;
 
 /**
- * Transitions an APPROVED run into TRANSFERRING and spins up the initial
- * pool of TransferWorkerJob instances. Each worker re-enqueues exactly one
- * replacement job after finishing a file, so the pool size stays constant
- * at the configured concurrency without needing an external queue.
+ * Transitions an APPROVED run into TRANSFERRING and spawns one
+ * TransferWorkerJob per mapped user (skipping any user whose discovery
+ * failed). Each user's worker lineage re-enqueues itself under that same
+ * user until that user's files are exhausted, so it only ever authenticates
+ * as one target user for its whole lifetime - WebDavClient's connection
+ * never has to switch users mid-job. The run only moves on to VERIFYING
+ * once every user's lineage has drained (see
+ * RunOrchestrator::onUserTransferComplete()).
  */
 class EnqueueTransfersJob extends QueuedJob {
 	public function __construct(
 		ITimeFactory $time,
 		private RunOrchestrator $runOrchestrator,
+		private UserMapMapper $userMapMapper,
 		private IJobList $jobList,
 		private LoggerInterface $logger,
 	) {
@@ -54,9 +61,21 @@ class EnqueueTransfersJob extends QueuedJob {
 
 		$this->runOrchestrator->beginTransferring($runId);
 
-		$workers = $this->runOrchestrator->getConcurrentWorkers();
-		for ($i = 0; $i < $workers; $i++) {
-			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
+		$spawned = 0;
+		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+			if ($userMap->getState() === UserMap::STATE_FAILED) {
+				continue;
+			}
+			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()]);
+			$spawned++;
+		}
+
+		if ($spawned === 0) {
+			// Every mapped user failed discovery (or there are none) - nothing
+			// to transfer, so nothing will ever call back in to advance the
+			// run. Move it along directly instead of leaving it stuck in
+			// TRANSFERRING forever.
+			$this->runOrchestrator->onTransferPoolIdle($runId);
 		}
 	}
 

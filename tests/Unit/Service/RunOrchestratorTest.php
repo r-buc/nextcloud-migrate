@@ -12,6 +12,7 @@ use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\MigrationRunMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
+use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\CredentialService;
 use OCA\NextcloudMigrate\Service\EventLogger;
@@ -170,7 +171,13 @@ final class RunOrchestratorTest extends TestCase {
 		$this->fileMapper->method('countByState')->willReturn([
 			MigrationFile::STATE_TRANSFERRED => 2,
 		]);
-		$this->config->method('getAppValue')->willReturn('2');
+		$userMapA = new UserMap();
+		$userMapA->setId(1);
+		$userMapA->setState(UserMap::STATE_ACTIVE);
+		$userMapB = new UserMap();
+		$userMapB->setId(2);
+		$userMapB->setState(UserMap::STATE_ACTIVE);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMapA, $userMapB]);
 		$this->jobList->expects($this->exactly(2))
 			->method('add')
 			->with(VerifyWorkerJob::class, self::callback(fn ($arg) => $arg['runId'] === 42));

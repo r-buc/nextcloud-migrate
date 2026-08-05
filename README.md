@@ -44,11 +44,20 @@ ACLs.
   *after* a file has already been verified are not detected or re-migrated.
   Avoid heavy write activity on the source during a run.
 - **Orchestration**: entirely native Nextcloud background jobs (no
-  Redis/external queue). Self-perpetuating worker pools
-  (`TransferWorkerJob`, `VerifyWorkerJob`) keep a constant number of jobs
-  in flight, claiming one file at a time via DB-row locking
-  (`lock_owner`/`lock_expires_at`), with `CleanupLocksJob` reclaiming rows
-  left behind by a crashed worker.
+  Redis/external queue). One self-perpetuating `TransferWorkerJob` (then
+  one `VerifyWorkerJob`) lineage per mapped user, each processing many
+  files in a batched loop (`RunOrchestrator::getBatchSeconds()`, default
+  240s) before re-enqueueing itself, and claiming files via DB-row locking
+  (`lock_owner`/`lock_expires_at`) as a crash-safety net rather than for
+  cross-worker contention - since each lineage only ever works its own
+  user's files, there's no risk of two lineages racing for the same row.
+  Scoping one lineage per user also means each one only ever authenticates
+  as that single target user for its whole lifetime, so `WebDavClient`'s
+  reused/keep-alive connection never has to be torn down and reopened
+  mid-job. `CleanupLocksJob` reclaims rows left behind by a crashed worker.
+  The run only advances past TRANSFERRING/VERIFYING once every user's
+  lineage has drained (`RunOrchestrator::onUserTransferComplete()`/
+  `onUserVerificationComplete()`).
 - **Run lifecycle**: `CREATED -> VALIDATING -> DISCOVERING -> DRY_RUN_READY
   -> APPROVED -> TRANSFERRING -> VERIFYING -> FINALIZING -> COMPLETED |
   COMPLETED_WITH_ERRORS`, with `PAUSED`/`CANCELLED`/`VALIDATION_FAILED`

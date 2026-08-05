@@ -36,14 +36,6 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
  *   Any non-terminal state -> CANCELLED
  */
 class RunOrchestrator {
-	// Single worker by default: with the internal batching in
-	// TransferWorkerJob/VerifyWorkerJob (each execution now processes many
-	// files per cron tick, not just one), a single sequential worker avoids
-	// the lock-contention/race-handling complexity of a concurrent pool
-	// entirely while still getting good throughput. Still configurable via
-	// `occ config:app:set nextcloud_migrate concurrent_workers --value=N`
-	// for anyone who wants to re-enable parallelism for very large runs.
-	private const DEFAULT_CONCURRENT_WORKERS = 1;
 	// How long a single TransferWorkerJob/VerifyWorkerJob execution keeps
 	// claiming and processing files in a loop before re-enqueueing itself,
 	// rather than handling exactly one file per execution. cron.php (CLI
@@ -278,10 +270,6 @@ class RunOrchestrator {
 		}
 	}
 
-	public function getConcurrentWorkers(): int {
-		return (int)$this->config->getAppValue('nextcloud_migrate', 'concurrent_workers', (string)self::DEFAULT_CONCURRENT_WORKERS);
-	}
-
 	/**
 	 * How many seconds a single TransferWorkerJob/VerifyWorkerJob execution
 	 * should keep claiming and processing files before yielding back (by
@@ -298,7 +286,32 @@ class RunOrchestrator {
 
 	/**
 	 * Called by a TransferWorkerJob when it finds no more transferable files
-	 * and no other files still in-flight for the run.
+	 * and no other files still in-flight *for its own user*. Since transfer
+	 * runs one worker lineage per mapped user (see EnqueueTransfersJob), the
+	 * run as a whole is only ready to move on once every user's lineage has
+	 * reached this point too.
+	 */
+	public function onUserTransferComplete(int $runId, int $userMapId): void {
+		$run = $this->runMapper->find($runId);
+		if (!in_array($run->getState(), [MigrationRun::STATE_TRANSFERRING, MigrationRun::STATE_APPROVED], true)) {
+			return;
+		}
+
+		if ($this->anyUserStillTransferring($runId)) {
+			// Another mapped user's TransferWorkerJob lineage is still
+			// working; whichever one finishes last will trigger the phase
+			// transition below.
+			return;
+		}
+
+		$this->onTransferPoolIdle($runId);
+	}
+
+	/**
+	 * Advances the run out of TRANSFERRING once every mapped user's
+	 * TransferWorkerJob lineage has drained. Also called directly by
+	 * EnqueueTransfersJob when a run has nothing to transfer at all (e.g.
+	 * every mapped user failed discovery).
 	 */
 	public function onTransferPoolIdle(int $runId): void {
 		$run = $this->runMapper->find($runId);
@@ -327,9 +340,26 @@ class RunOrchestrator {
 
 		$this->eventLogger->log($runId, 'transfer_completed', 'All transferable files processed; starting verification');
 
-		for ($i = 0; $i < $this->getConcurrentWorkers(); $i++) {
-			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
+		$this->spawnVerifyWorkers($runId);
+	}
+
+	/**
+	 * Called by a VerifyWorkerJob when it finds no more verifiable files
+	 * and no other files still in-flight *for its own user* - mirrors
+	 * onUserTransferComplete()/onTransferPoolIdle() above (one worker
+	 * lineage per mapped user).
+	 */
+	public function onUserVerificationComplete(int $runId, int $userMapId): void {
+		$run = $this->runMapper->find($runId);
+		if ($run->getState() !== MigrationRun::STATE_VERIFYING) {
+			return;
 		}
+
+		if ($this->anyUserStillVerifying($runId)) {
+			return;
+		}
+
+		$this->onVerificationPoolIdle($runId);
 	}
 
 	/**
@@ -413,9 +443,7 @@ class RunOrchestrator {
 		} elseif ($verifiableRemaining > 0) {
 			$run->setState(MigrationRun::STATE_VERIFYING);
 			$this->runMapper->update($run);
-			for ($i = 0; $i < $this->getConcurrentWorkers(); $i++) {
-				$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
-			}
+			$this->spawnVerifyWorkers($runId);
 		} else {
 			$run->setState(MigrationRun::STATE_FINALIZING);
 			$this->runMapper->update($run);
@@ -482,5 +510,62 @@ class RunOrchestrator {
 			+ ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
 			+ ($counts[MigrationFile::STATE_MAPPING_FAILED] ?? 0)
 		);
+	}
+
+	/**
+	 * Spawns one VerifyWorkerJob per mapped user (skipping users whose
+	 * discovery failed - nothing of theirs was ever transferred), mirroring
+	 * the one-worker-lineage-per-user model EnqueueTransfersJob uses for
+	 * transfer. Each user's own credentials are used consistently for that
+	 * whole lineage's requests, so WebDavClient never has to switch target
+	 * users (and thus never has to tear down/reopen its connection) mid-job.
+	 */
+	private function spawnVerifyWorkers(int $runId): void {
+		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+			if ($userMap->getState() === UserMap::STATE_FAILED) {
+				continue;
+			}
+			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()]);
+		}
+	}
+
+	/**
+	 * @see onUserTransferComplete()
+	 */
+	private function anyUserStillTransferring(int $runId): bool {
+		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+			if ($userMap->getState() === UserMap::STATE_FAILED) {
+				continue;
+			}
+			$counts = $this->fileMapper->countByState($runId, $userMap->getId());
+			$remaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0)
+				+ ($counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0)
+				+ ($counts[MigrationFile::STATE_TRANSFERRING] ?? 0);
+			if ($remaining > 0) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @see onUserVerificationComplete()
+	 */
+	private function anyUserStillVerifying(int $runId): bool {
+		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+			if ($userMap->getState() === UserMap::STATE_FAILED) {
+				continue;
+			}
+			$counts = $this->fileMapper->countByState($runId, $userMap->getId());
+			$remaining = ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0)
+				+ ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
+				+ ($counts[MigrationFile::STATE_VERIFYING] ?? 0);
+			if ($remaining > 0) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 }

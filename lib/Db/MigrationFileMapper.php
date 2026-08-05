@@ -81,7 +81,7 @@ class MigrationFileMapper extends QBMapper {
 	 * @return MigrationFile[]
 	 * @throws Exception
 	 */
-	public function findTransferable(int $runId, int $now, int $limit): array {
+	public function findTransferable(int $runId, int $now, int $limit, ?int $userMapId = null): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('*')
 			->from($this->getTableName())
@@ -98,8 +98,11 @@ class MigrationFileMapper extends QBMapper {
 				$qb->expr()->isNull('next_retry_at'),
 				$qb->expr()->lte('next_retry_at', $qb->createNamedParameter($now))
 			))
-			->andWhere($qb->expr()->lt('transfer_attempts', $qb->createNamedParameter(MigrationFile::MAX_TRANSFER_ATTEMPTS)))
-			->setMaxResults($limit)
+			->andWhere($qb->expr()->lt('transfer_attempts', $qb->createNamedParameter(MigrationFile::MAX_TRANSFER_ATTEMPTS)));
+		if ($userMapId !== null) {
+			$qb->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)));
+		}
+		$qb->setMaxResults($limit)
 			->orderBy('id', 'ASC');
 
 		return $this->findEntities($qb);
@@ -109,7 +112,7 @@ class MigrationFileMapper extends QBMapper {
 	 * @return MigrationFile[]
 	 * @throws Exception
 	 */
-	public function findVerifiable(int $runId, int $now, int $limit): array {
+	public function findVerifiable(int $runId, int $now, int $limit, ?int $userMapId = null): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('*')
 			->from($this->getTableName())
@@ -122,8 +125,11 @@ class MigrationFileMapper extends QBMapper {
 				$qb->expr()->isNull('lock_expires_at'),
 				$qb->expr()->lt('lock_expires_at', $qb->createNamedParameter($now))
 			))
-			->andWhere($qb->expr()->lt('verify_attempts', $qb->createNamedParameter(MigrationFile::MAX_VERIFY_ATTEMPTS)))
-			->setMaxResults($limit)
+			->andWhere($qb->expr()->lt('verify_attempts', $qb->createNamedParameter(MigrationFile::MAX_VERIFY_ATTEMPTS)));
+		if ($userMapId !== null) {
+			$qb->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)));
+		}
+		$qb->setMaxResults($limit)
 			->orderBy('id', 'ASC');
 
 		return $this->findEntities($qb);
@@ -133,13 +139,16 @@ class MigrationFileMapper extends QBMapper {
 	 * @return array<string,int> counts keyed by state
 	 * @throws Exception
 	 */
-	public function countByState(int $runId): array {
+	public function countByState(int $runId, ?int $userMapId = null): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('state')
 			->selectAlias($qb->createFunction('COUNT(*)'), 'cnt')
 			->from($this->getTableName())
-			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
-			->groupBy('state');
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)));
+		if ($userMapId !== null) {
+			$qb->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)));
+		}
+		$qb->groupBy('state');
 
 		$result = $qb->executeQuery();
 		$counts = [];
