@@ -17,7 +17,7 @@ services:
       - "8081:80"
     volumes:
       # Mount the app source read-only and provide a writable custom_apps volume.
-      - /home/runner/work/nextcloud-migrate/nextcloud-migrate:/workspace/nextcloud_migrate:ro
+      - ${APP_SOURCE_PATH:-.}:/workspace/nextcloud_migrate:ro
       - nc_source_custom_apps:/var/www/html/custom_apps
       - nc_source_data:/var/www/html/data
     networks:

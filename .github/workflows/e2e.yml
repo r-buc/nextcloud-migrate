@@ -37,6 +37,7 @@ jobs:
       - name: Start Nextcloud containers
         env:
           NC_IMAGE: nextcloud:${{ matrix.nextcloud }}-apache
+          APP_SOURCE_PATH: ${{ github.workspace }}
         run: |
           # Substitute the image tag before docker compose reads the file
           sed "s|nextcloud:28-apache|${NC_IMAGE}|g" docker-compose.e2e.yml > /tmp/docker-compose.e2e.yml
@@ -45,7 +46,7 @@ jobs:
       - name: Disable App Store during bootstrap
         run: |
           for container in nc-source nc-target; do
-            docker exec "$container" sh -c "printf '%s\n' '<?php' '\$CONFIG = [' \"  '\\''appstoreenabled'\\'' => false,\" '];' > /var/www/html/config/zz-e2e.config.php"
+            docker exec "$container" sh -c "mkdir -p /var/www/html/config && printf '%s\n' '<?php' '\$CONFIG = [' \"  '\\''appstoreenabled'\\'' => false,\" '];' > /var/www/html/config/zz-e2e.config.php"
           done
 
       # -----------------------------------------------------------------------
