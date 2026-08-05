@@ -81,6 +81,13 @@ class RunOrchestrator {
 	 *        needed. mode 'manual' ("expert mode") uses an app password the
 	 *        admin already obtained from that specific target user instead,
 	 *        without touching their account via the admin API at all.
+	 * @param bool $skipVerification if true, the post-transfer verification
+	 *        phase (re-downloading every file from the target to compare
+	 *        checksums) is skipped once transfer completes, relying solely
+	 *        on the target's upload-time OC-Checksum validation. Defaults
+	 *        to false (verification on) since that also catches narrower
+	 *        cases upload-time validation cannot, e.g. post-write storage
+	 *        corruption on the target.
 	 * @throws \InvalidArgumentException
 	 * @throws RemoteConnectionException if an 'auto' mapping's create/reset call fails
 	 */
@@ -89,6 +96,7 @@ class RunOrchestrator {
 		int $instanceId,
 		string $collisionStrategy,
 		array $mappings,
+		bool $skipVerification = false,
 	): MigrationRun {
 		if ($mappings === []) {
 			throw new \InvalidArgumentException('At least one user mapping is required');
@@ -139,6 +147,7 @@ class RunOrchestrator {
 		$run->setInstanceId($instanceId);
 		$run->setState(MigrationRun::STATE_CREATED);
 		$run->setCollisionStrategy($collisionStrategy);
+		$run->setSkipVerification($skipVerification);
 		$run->setTotalUsers(count($resolved));
 		$run->setTotalFiles(0);
 		$run->setTransferredFiles(0);
@@ -300,6 +309,18 @@ class RunOrchestrator {
 		$counts = $this->fileMapper->countByState($runId);
 		$this->refreshRunCounters($run, $counts);
 
+		if ($run->getSkipVerification()) {
+			$run->setState(MigrationRun::STATE_FINALIZING);
+			$run->setUpdatedAt(time());
+			$this->runMapper->update($run);
+
+			$this->eventLogger->log($runId, 'transfer_completed', 'All transferable files processed; verification skipped for this run, finalizing');
+
+			$this->jobList->add(FinalizeJob::class, ['runId' => $runId]);
+
+			return;
+		}
+
 		$run->setState(MigrationRun::STATE_VERIFYING);
 		$run->setUpdatedAt(time());
 		$this->runMapper->update($run);
@@ -381,7 +402,9 @@ class RunOrchestrator {
 
 		$counts = $this->fileMapper->countByState($runId);
 		$transferableRemaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0) + ($counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0);
-		$verifiableRemaining = ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0) + ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0);
+		$verifiableRemaining = !$run->getSkipVerification()
+			? ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0) + ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
+			: 0;
 
 		if ($transferableRemaining > 0) {
 			$run->setState(MigrationRun::STATE_TRANSFERRING);

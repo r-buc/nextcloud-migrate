@@ -67,6 +67,19 @@
 				target account at all.
 			</p>
 
+			<p>
+				<label for="ncm-skip-verification">Skip post-transfer verification</label>
+				<input type="checkbox" id="ncm-skip-verification" name="skipVerification">
+			</p>
+			<p class="settings-hint">
+				The target already validates each file's checksum at upload time
+				(via the OC-Checksum header) and rejects the write on a mismatch,
+				so this is safe to enable for faster migrations. Leave unchecked
+				(default) to additionally re-download every file afterwards and
+				compare checksums, which also catches rarer issues such as
+				storage corruption on the target after a successful upload.
+			</p>
+
 			<table id="ncm-user-mappings-table">
 				<thead>
 					<tr>

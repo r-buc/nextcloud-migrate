@@ -224,6 +224,7 @@
 			body: JSON.stringify({
 				collisionStrategy: form.collisionStrategy.value,
 				userMappings: userMappings,
+				skipVerification: document.getElementById('ncm-skip-verification').checked,
 			}),
 		}).then(function (run) {
 			showRunDetail(run.id);

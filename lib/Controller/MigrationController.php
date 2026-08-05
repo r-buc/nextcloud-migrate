@@ -179,8 +179,11 @@ class MigrationController extends Controller {
 	 * parameter to pick from a list).
 	 *
 	 * @param array<array{sourceUserId: string, targetUserId: string, mode?: string, appPassword?: string}> $userMappings
+	 * @param bool $skipVerification skip the post-transfer verification
+	 *        phase and rely solely on the target's upload-time OC-Checksum
+	 *        validation. Defaults to false (verification on).
 	 */
-	public function createRun(string $collisionStrategy, array $userMappings): JSONResponse {
+	public function createRun(string $collisionStrategy, array $userMappings, bool $skipVerification = false): JSONResponse {
 		$instances = $this->instanceMapper->findAllForOwner($this->currentUserId());
 		if ($instances === []) {
 			return new JSONResponse(['error' => 'Configure a target instance before starting a migration'], Http::STATUS_BAD_REQUEST);
@@ -191,7 +194,7 @@ class MigrationController extends Controller {
 		}
 
 		try {
-			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings);
+			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings, $skipVerification);
 		} catch (\InvalidArgumentException $e) {
 			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_REQUEST);
 		} catch (RemoteConnectionException $e) {

@@ -55,39 +55,52 @@ class StatusController extends Controller {
 		return new JSONResponse([
 			'run' => $run,
 			'stateCounts' => $counts,
-			'progressPercent' => $this->calculateProgressPercent($run->getTotalFiles(), $counts),
+			'progressPercent' => $this->calculateProgressPercent($run->getTotalFiles(), $counts, $run->getSkipVerification()),
 			'userMaps' => $userMaps,
 		]);
 	}
 
 	/**
 	 * Weights each file's contribution by how far it has progressed through
-	 * the two-phase (transfer, then verify) pipeline, so the reported
-	 * percentage reflects real progress throughout the whole run instead of
-	 * staying at 0% for the entire (often much longer) transfer phase and
-	 * only starting to move once verification begins.
+	 * the pipeline, so the reported percentage reflects real progress
+	 * throughout the whole run instead of staying at 0% for the entire
+	 * (often much longer) transfer phase and only starting to move once
+	 * verification begins. For runs that skip verification entirely, the
+	 * pipeline only has one phase, so TRANSFERRED already counts as fully
+	 * done rather than half-done.
 	 *
 	 * @param array<string,int> $counts
 	 */
-	private function calculateProgressPercent(int $totalFiles, array $counts): float {
+	private function calculateProgressPercent(int $totalFiles, array $counts, bool $skipVerification): float {
 		if ($totalFiles <= 0) {
 			return 0.0;
 		}
 
-		static $weights = [
-			MigrationFile::STATE_DISCOVERED => 0.0,
-			MigrationFile::STATE_MAPPED => 0.0,
-			MigrationFile::STATE_TRANSFERRING => 0.25,
-			MigrationFile::STATE_TRANSFER_FAILED => 0.25,
-			// Terminal - will never be transferred, so counts as settled.
-			MigrationFile::STATE_MAPPING_FAILED => 1.0,
-			MigrationFile::STATE_TRANSFERRED => 0.5,
-			MigrationFile::STATE_VERIFYING => 0.75,
-			MigrationFile::STATE_VERIFICATION_FAILED => 0.75,
-			MigrationFile::STATE_VERIFIED => 1.0,
-			MigrationFile::STATE_SKIPPED => 1.0,
-			MigrationFile::STATE_COMPLETED => 1.0,
-		];
+		$weights = $skipVerification
+			? [
+				MigrationFile::STATE_DISCOVERED => 0.0,
+				MigrationFile::STATE_MAPPED => 0.0,
+				MigrationFile::STATE_TRANSFERRING => 0.5,
+				MigrationFile::STATE_TRANSFER_FAILED => 0.5,
+				MigrationFile::STATE_MAPPING_FAILED => 1.0,
+				MigrationFile::STATE_TRANSFERRED => 1.0,
+				MigrationFile::STATE_SKIPPED => 1.0,
+				MigrationFile::STATE_COMPLETED => 1.0,
+			]
+			: [
+				MigrationFile::STATE_DISCOVERED => 0.0,
+				MigrationFile::STATE_MAPPED => 0.0,
+				MigrationFile::STATE_TRANSFERRING => 0.25,
+				MigrationFile::STATE_TRANSFER_FAILED => 0.25,
+				// Terminal - will never be transferred, so counts as settled.
+				MigrationFile::STATE_MAPPING_FAILED => 1.0,
+				MigrationFile::STATE_TRANSFERRED => 0.5,
+				MigrationFile::STATE_VERIFYING => 0.75,
+				MigrationFile::STATE_VERIFICATION_FAILED => 0.75,
+				MigrationFile::STATE_VERIFIED => 1.0,
+				MigrationFile::STATE_SKIPPED => 1.0,
+				MigrationFile::STATE_COMPLETED => 1.0,
+			];
 
 		$weighted = 0.0;
 		foreach ($counts as $state => $count) {

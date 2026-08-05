@@ -15,6 +15,8 @@ use OCP\AppFramework\Db\Entity;
  * @method void setState(string $state)
  * @method string getCollisionStrategy()
  * @method void setCollisionStrategy(string $collisionStrategy)
+ * @method bool getSkipVerification()
+ * @method void setSkipVerification(bool $skipVerification)
  * @method int getTotalUsers()
  * @method void setTotalUsers(int $totalUsers)
  * @method int getTotalFiles()
@@ -71,6 +73,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 	protected $instanceId;
 	protected $state;
 	protected $collisionStrategy;
+	protected $skipVerification;
 	protected $totalUsers;
 	protected $totalFiles;
 	protected $transferredFiles;
@@ -91,6 +94,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 
 	public function __construct() {
 		$this->addType('instanceId', 'integer');
+		$this->addType('skipVerification', 'boolean');
 		$this->addType('totalUsers', 'integer');
 		$this->addType('totalFiles', 'integer');
 		$this->addType('transferredFiles', 'integer');
@@ -112,6 +116,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 			'instanceId' => $this->getInstanceId(),
 			'state' => $this->getState(),
 			'collisionStrategy' => $this->getCollisionStrategy(),
+			'skipVerification' => $this->getSkipVerification(),
 			'totalUsers' => $this->getTotalUsers(),
 			'totalFiles' => $this->getTotalFiles(),
 			'transferredFiles' => $this->getTransferredFiles(),

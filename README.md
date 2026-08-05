@@ -57,6 +57,19 @@ ACLs.
   (`MappingService`), not as a separate bulk pre-pass, to avoid an extra
   PROPFIND round trip per file. Strategies: `rename` (default), `skip`,
   `overwrite`.
+- **Post-transfer verification (optional)**: every upload already includes
+  an `OC-Checksum` header (see `TransferService`/`WebDavClient`), which
+  Nextcloud's DAV server validates against the received bytes and rejects
+  on mismatch - so content integrity is already checked at transfer time.
+  The separate `VERIFYING` phase (`VerifyWorkerJob`) additionally
+  re-downloads every file from the target afterwards to compare checksums
+  again, which also catches rarer issues upload-time validation can't,
+  such as storage corruption on the target *after* a successful write.
+  Set `skipVerification: true` when creating a run (exposed as a checkbox
+  in the admin UI) to skip this second pass and go straight from
+  `TRANSFERRING` to `FINALIZING` once transfer completes - roughly halves
+  total network/IO cost for the run at the expense of that extra safety
+  net. Verification is on by default.
 - **v1 simplification**: one target instance and one current run per admin
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the
