@@ -52,18 +52,18 @@ class TransferService {
 	) {
 	}
 
-	public function transferDirectory(MigrationFile $file, RemoteInstance $instance, string $appPassword): void {
+	public function transferDirectory(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword): void {
 		$now = time();
 
 		try {
-			$this->webDavClient->makeCollection($instance, $appPassword, $file->getTargetPath() ?? $file->getSourcePath());
+			$this->webDavClient->makeCollection($instance, $targetUserId, $appPassword, $file->getTargetPath() ?? $file->getSourcePath());
 			// Folders have no content to verify; mark verified immediately
 			// so VerifyWorkerJob can skip them entirely.
 			$file->setState(MigrationFile::STATE_VERIFIED);
 			$file->setTransferredAt($now);
 			$file->setVerifiedAt($now);
 		} catch (\Throwable $e) {
-			$this->recordFailure($file, $instance, $appPassword, $e->getMessage());
+			$this->recordFailure($file, $instance, $targetUserId, $appPassword, $e->getMessage());
 		}
 
 		$file->setLockOwner(null);
@@ -72,7 +72,7 @@ class TransferService {
 		$this->fileMapper->update($file);
 	}
 
-	public function transferFile(MigrationFile $file, RemoteInstance $instance, string $appPassword, string $sourceUserId): void {
+	public function transferFile(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword, string $sourceUserId): void {
 		$now = time();
 
 		try {
@@ -83,9 +83,9 @@ class TransferService {
 			}
 
 			if ($node->getSize() >= MigrationFile::CHUNKED_UPLOAD_THRESHOLD_BYTES) {
-				$this->transferFileChunked($file, $instance, $appPassword, $node, $sourceUserId);
+				$this->transferFileChunked($file, $instance, $targetUserId, $appPassword, $node, $sourceUserId);
 			} else {
-				$this->transferFileSimple($file, $instance, $appPassword, $node, $sourceUserId);
+				$this->transferFileSimple($file, $instance, $targetUserId, $appPassword, $node, $sourceUserId);
 			}
 
 			$file->setState(MigrationFile::STATE_TRANSFERRED);
@@ -98,9 +98,9 @@ class TransferService {
 			$file->setLastError('Source file no longer exists: ' . $e->getMessage());
 			$this->eventLogger->log($file->getRunId(), 'source_missing', "Source file '{$file->getSourcePath()}' no longer exists", 'warning', $file->getId());
 		} catch (TransferException $e) {
-			$this->recordFailure($file, $instance, $appPassword, $e->getMessage(), $e->isRetryable());
+			$this->recordFailure($file, $instance, $targetUserId, $appPassword, $e->getMessage(), $e->isRetryable());
 		} catch (\Throwable $e) {
-			$this->recordFailure($file, $instance, $appPassword, $e->getMessage());
+			$this->recordFailure($file, $instance, $targetUserId, $appPassword, $e->getMessage());
 		}
 
 		$file->setLockOwner(null);
@@ -112,7 +112,7 @@ class TransferService {
 	/**
 	 * @throws TransferException
 	 */
-	private function transferFileSimple(MigrationFile $file, RemoteInstance $instance, string $appPassword, \OCP\Files\File $node, string $sourceUserId): void {
+	private function transferFileSimple(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword, \OCP\Files\File $node, string $sourceUserId): void {
 		$sourcePath = $file->getSourcePath();
 		$preMtime = $node->getMTime();
 		$preSize = $node->getSize();
@@ -140,10 +140,11 @@ class TransferService {
 		$sha256 = hash_final($ctx);
 		rewind($buffer);
 
-		$this->assertNotChangedDuringRead($file, $instance, $appPassword, $sourceUserId, $preMtime, $preSize);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize);
 
 		$this->webDavClient->putFile(
 			$instance,
+			$targetUserId,
 			$appPassword,
 			$file->getTargetPath() ?? $sourcePath,
 			$buffer,
@@ -166,7 +167,7 @@ class TransferService {
 	 *
 	 * @throws TransferException
 	 */
-	private function transferFileChunked(MigrationFile $file, RemoteInstance $instance, string $appPassword, \OCP\Files\File $node, string $sourceUserId): void {
+	private function transferFileChunked(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword, \OCP\Files\File $node, string $sourceUserId): void {
 		$preMtime = $node->getMTime();
 		$preSize = $node->getSize();
 
@@ -180,8 +181,8 @@ class TransferService {
 
 		$transferId = $file->getTransferId();
 		$sourcePath = $file->getSourcePath();
-		$this->webDavClient->startChunkedUpload($instance, $appPassword, $transferId);
-		$uploadedChunks = array_flip($this->webDavClient->listUploadedChunks($instance, $appPassword, $transferId));
+		$this->webDavClient->startChunkedUpload($instance, $targetUserId, $appPassword, $transferId);
+		$uploadedChunks = array_flip($this->webDavClient->listUploadedChunks($instance, $targetUserId, $appPassword, $transferId));
 
 		$size = $node->getSize();
 		$chunkSize = MigrationFile::CHUNK_SIZE_BYTES;
@@ -221,7 +222,7 @@ class TransferService {
 			}
 			rewind($buffer);
 
-			$this->webDavClient->uploadChunk($instance, $appPassword, $transferId, $chunkIndex, $buffer, $read);
+			$this->webDavClient->uploadChunk($instance, $targetUserId, $appPassword, $transferId, $chunkIndex, $buffer, $read);
 			fclose($buffer);
 
 			$bytesAccounted += $read;
@@ -233,11 +234,12 @@ class TransferService {
 		}
 		fclose($source);
 
-		$this->assertNotChangedDuringRead($file, $instance, $appPassword, $sourceUserId, $preMtime, $preSize);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize);
 
 		$sha256 = hash_final($ctx);
 		$this->webDavClient->assembleChunkedUpload(
 			$instance,
+			$targetUserId,
 			$appPassword,
 			$transferId,
 			$file->getTargetPath() ?? $sourcePath,
@@ -270,6 +272,7 @@ class TransferService {
 	private function assertNotChangedDuringRead(
 		MigrationFile $file,
 		RemoteInstance $instance,
+		string $targetUserId,
 		string $appPassword,
 		string $sourceUserId,
 		int $preMtime,
@@ -290,7 +293,7 @@ class TransferService {
 		);
 
 		if ($file->getTransferId() !== null) {
-			$this->webDavClient->abortChunkedUpload($instance, $appPassword, $file->getTransferId());
+			$this->webDavClient->abortChunkedUpload($instance, $targetUserId, $appPassword, $file->getTransferId());
 			$file->setTransferId(null);
 			$file->setNextChunkIndex(0);
 			$file->setBytesTransferred(0);
@@ -325,7 +328,7 @@ class TransferService {
 		}
 	}
 
-	private function recordFailure(MigrationFile $file, RemoteInstance $instance, string $appPassword, string $message, bool $retryable = true): void {
+	private function recordFailure(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword, string $message, bool $retryable = true): void {
 		$attempts = $file->getTransferAttempts() + 1;
 		$file->setTransferAttempts($attempts);
 		$file->setState(MigrationFile::STATE_TRANSFER_FAILED);
@@ -345,7 +348,7 @@ class TransferService {
 		// staging collection on the target so we don't leak storage there.
 		$file->setNextRetryAt(null);
 		if ($file->getTransferId() !== null) {
-			$this->webDavClient->abortChunkedUpload($instance, $appPassword, $file->getTransferId());
+			$this->webDavClient->abortChunkedUpload($instance, $targetUserId, $appPassword, $file->getTransferId());
 		}
 	}
 }

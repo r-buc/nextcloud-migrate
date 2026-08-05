@@ -21,17 +21,17 @@ class VerificationService {
 	) {
 	}
 
-	public function verifyFile(MigrationFile $file, RemoteInstance $instance, string $appPassword): void {
+	public function verifyFile(MigrationFile $file, RemoteInstance $instance, string $targetUserId, string $appPassword): void {
 		$now = time();
 		$targetPath = $file->getTargetPath() ?? $file->getSourcePath();
 
 		try {
-			$remote = $this->webDavClient->stat($instance, $appPassword, $targetPath);
+			$remote = $this->webDavClient->stat($instance, $targetUserId, $appPassword, $targetPath);
 			if ($remote === null) {
 				throw new TransferException('Target file missing at verification time', true);
 			}
 
-			$targetChecksum = $remote['checksum'] ?? $this->webDavClient->fetchSha256($instance, $appPassword, $targetPath);
+			$targetChecksum = $remote['checksum'] ?? $this->webDavClient->fetchSha256($instance, $targetUserId, $appPassword, $targetPath);
 			$file->setTargetChecksum($targetChecksum);
 
 			$matches = $file->getSourceChecksum() !== null

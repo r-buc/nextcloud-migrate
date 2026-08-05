@@ -13,6 +13,8 @@ use OCP\AppFramework\Db\Entity;
  * @method void setSourceUserId(string $sourceUserId)
  * @method string getTargetUserId()
  * @method void setTargetUserId(string $targetUserId)
+ * @method string|null getTargetAppPasswordEncrypted()
+ * @method void setTargetAppPasswordEncrypted(?string $targetAppPasswordEncrypted)
  * @method string getState()
  * @method void setState(string $state)
  * @method int getTotalFiles()
@@ -33,6 +35,7 @@ class UserMap extends Entity implements \JsonSerializable {
 	protected $runId;
 	protected $sourceUserId;
 	protected $targetUserId;
+	protected $targetAppPasswordEncrypted;
 	protected $state;
 	protected $totalFiles;
 	protected $transferredFiles;

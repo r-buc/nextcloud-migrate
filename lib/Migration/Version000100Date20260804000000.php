@@ -14,9 +14,19 @@ use OCP\Migration\SimpleMigrationStep;
  * Initial schema for the Nextcloud Migrate app.
  *
  * Tables:
- *  - migrate_instances : encrypted credentials for a remote (target) instance
+ *  - migrate_instances : connection settings (URL, TLS policy) for a remote
+ *                        (target) instance, plus a remote ADMIN credential
+ *                        used ONLY for the OCS Provisioning API (listing
+ *                        users, resetting a user's password as part of the
+ *                        default "auto" mapping mode). It is never used for
+ *                        WebDAV file writes: Nextcloud's DAV backend has no
+ *                        admin-bypass for other users' files, so all actual
+ *                        file transfer authenticates as the specific user
+ *                        in migrate_user_map.
  *  - migrate_runs      : one migration run (source instance -> one target instance)
- *  - migrate_user_map  : source user -> target user mapping within a run
+ *  - migrate_user_map  : source user -> target user mapping within a run,
+ *                        including that target user's own encrypted app
+ *                        password (either admin-reset or manually supplied)
  *  - migrate_files     : per-file discovery/transfer/verification state
  *  - migrate_events    : append-only audit log for a run
  */
@@ -31,8 +41,8 @@ class Version000100Date20260804000000 extends SimpleMigrationStep {
 			$table->addColumn('uuid', Types::STRING, ['notnull' => true, 'length' => 64]);
 			$table->addColumn('label', Types::STRING, ['notnull' => false, 'length' => 255]);
 			$table->addColumn('url', Types::STRING, ['notnull' => true, 'length' => 1024]);
-			$table->addColumn('target_user_id', Types::STRING, ['notnull' => true, 'length' => 255]);
-			$table->addColumn('app_password_encrypted', Types::TEXT, ['notnull' => true]);
+			$table->addColumn('admin_user_id', Types::STRING, ['notnull' => true, 'length' => 255]);
+			$table->addColumn('admin_app_password_encrypted', Types::TEXT, ['notnull' => true]);
 			// Not notnull+default: Nextcloud's schema validator rejects a
 			// literal boolean default combined with notnull (Oracle
 			// portability guard). The app always calls setAllowSelfSigned()
@@ -83,6 +93,12 @@ class Version000100Date20260804000000 extends SimpleMigrationStep {
 			$table->addColumn('run_id', Types::BIGINT, ['notnull' => true]);
 			$table->addColumn('source_user_id', Types::STRING, ['notnull' => true, 'length' => 64]);
 			$table->addColumn('target_user_id', Types::STRING, ['notnull' => true, 'length' => 64]);
+			// Each mapped user has their OWN target app password: Nextcloud's
+			// WebDAV auth backend rewrites the DAV principal to whichever user
+			// the request authenticates as, so a single shared/admin
+			// credential cannot write into a different user's files - there is
+			// no admin bypass over WebDAV (verified against server source).
+			$table->addColumn('target_app_password_encrypted', Types::TEXT, ['notnull' => false]);
 			$table->addColumn('state', Types::STRING, ['notnull' => true, 'length' => 32, 'default' => 'pending']);
 			$table->addColumn('total_files', Types::BIGINT, ['notnull' => true, 'default' => 0]);
 			$table->addColumn('transferred_files', Types::BIGINT, ['notnull' => true, 'default' => 0]);
@@ -128,7 +144,10 @@ class Version000100Date20260804000000 extends SimpleMigrationStep {
 			$table->addIndex(['run_id', 'state'], 'migrate_file_run_state_idx');
 			$table->addIndex(['user_map_id'], 'migrate_file_umap_idx');
 			$table->addIndex(['next_retry_at'], 'migrate_file_retry_idx');
-			$table->addUniqueIndex(['run_id', 'source_path_hash'], 'migrate_file_unique_idx');
+			// Scoped per user_map, not just run: different source users in the
+			// same run commonly share identical relative paths (e.g. everyone
+			// has a "Documents" folder), which would otherwise collide.
+			$table->addUniqueIndex(['run_id', 'user_map_id', 'source_path_hash'], 'migrate_file_unique_idx');
 		}
 
 		if (!$schema->hasTable('migrate_events')) {

@@ -17,6 +17,14 @@ use Psr\Log\LoggerInterface;
  * (see DiscoveryService/TransferService). The target instance is only ever
  * reachable over the network, hence this WebDAV wrapper.
  *
+ * Every method that touches a specific user's files takes an explicit
+ * $targetUserId + that user's own $appPassword: Nextcloud's WebDAV auth
+ * backend (apps/dav/lib/Connector/Sabre/Auth.php) rewrites the DAV
+ * principal to whichever user actually authenticates, so there is no
+ * admin-bypass for writing into a different user's files/ collection - a
+ * shared/admin credential simply cannot do it. RemoteInstance therefore
+ * only carries connection settings (URL, TLS policy), never credentials.
+ *
  * Implemented with plain PHP curl rather than OCP\Http\Client: the WebDAV
  * verbs this app needs (PROPFIND, MKCOL, MOVE) can only be sent through
  * OCP\Http\Client\IClient's generic request() method, which was only added
@@ -31,13 +39,39 @@ class WebDavClient {
 	}
 
 	/**
-	 * Verifies the target is reachable and the credentials are valid by
-	 * issuing a shallow PROPFIND against the user's DAV root.
+	 * Verifies the target URL is reachable and looks like a Nextcloud
+	 * instance, using the public, unauthenticated status.php endpoint - no
+	 * credentials are involved at the instance level (see class docblock).
 	 *
 	 * @throws RemoteConnectionException
 	 */
-	public function testConnection(RemoteInstance $instance, string $appPassword): void {
-		$this->propfind($instance, $appPassword, '', 0);
+	public function testConnection(RemoteInstance $instance): void {
+		$uri = rtrim($instance->getUrl(), '/') . '/status.php';
+
+		try {
+			$response = $this->execute('GET', $uri, [
+				'verify' => !$instance->getAllowSelfSigned(),
+				'timeout' => self::REQUEST_TIMEOUT,
+			]);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			throw new RemoteConnectionException('Failed to reach target instance: ' . $e->getMessage(), $status ?? 0, $e);
+		}
+
+		$data = json_decode($response['body'], true);
+		if (!is_array($data) || !isset($data['version'])) {
+			throw new RemoteConnectionException('URL did not respond like a Nextcloud instance (status.php)', 0);
+		}
+	}
+
+	/**
+	 * Verifies a specific mapped user's own app password is valid by issuing
+	 * a shallow PROPFIND against their own DAV root.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function testUserCredentials(RemoteInstance $instance, string $targetUserId, string $appPassword): void {
+		$this->propfind($instance, $targetUserId, $appPassword, '', 0);
 	}
 
 	/**
@@ -45,9 +79,9 @@ class WebDavClient {
 	 *         remote path does not exist
 	 * @throws RemoteConnectionException
 	 */
-	public function stat(RemoteInstance $instance, string $appPassword, string $path): ?array {
+	public function stat(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path): ?array {
 		try {
-			$props = $this->propfind($instance, $appPassword, $path, 0);
+			$props = $this->propfind($instance, $targetUserId, $appPassword, $path, 0);
 		} catch (RemoteConnectionException $e) {
 			if ($e->getCode() === 404) {
 				return null;
@@ -64,11 +98,11 @@ class WebDavClient {
 	 *
 	 * @throws RemoteConnectionException
 	 */
-	public function makeCollection(RemoteInstance $instance, string $appPassword, string $path): void {
-		$uri = $this->buildUri($instance, $path);
+	public function makeCollection(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path): void {
+		$uri = $this->buildUri($instance, $targetUserId, $path);
 
 		try {
-			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $targetUserId, $appPassword));
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			// 405 = already exists, treat as success for idempotent folder creation.
@@ -89,6 +123,7 @@ class WebDavClient {
 	 */
 	public function putFile(
 		RemoteInstance $instance,
+		string $targetUserId,
 		string $appPassword,
 		string $path,
 		$stream,
@@ -96,7 +131,7 @@ class WebDavClient {
 		int $mtime,
 		?string $sha256 = null,
 	): void {
-		$uri = $this->buildUri($instance, $path);
+		$uri = $this->buildUri($instance, $targetUserId, $path);
 
 		$headers = [
 			'X-OC-MTime' => (string)$mtime,
@@ -105,7 +140,7 @@ class WebDavClient {
 			$headers['OC-Checksum'] = 'SHA256:' . $sha256;
 		}
 
-		$options = $this->baseOptions($instance, $appPassword);
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
 		$options['headers'] = array_merge($options['headers'], $headers);
 		$options['body'] = $stream;
 		$options['bodySize'] = $size;
@@ -130,11 +165,11 @@ class WebDavClient {
 	 *
 	 * @throws RemoteConnectionException
 	 */
-	public function startChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
-		$uri = $this->buildUploadUri($instance, $transferId, '');
+	public function startChunkedUpload(RemoteInstance $instance, string $targetUserId, string $appPassword, string $transferId): void {
+		$uri = $this->buildUploadUri($instance, $targetUserId, $transferId, '');
 
 		try {
-			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $targetUserId, $appPassword));
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			if ($status === 405) {
@@ -153,15 +188,16 @@ class WebDavClient {
 	 */
 	public function uploadChunk(
 		RemoteInstance $instance,
+		string $targetUserId,
 		string $appPassword,
 		string $transferId,
 		int $chunkIndex,
 		$chunkStream,
 		int $chunkSize,
 	): void {
-		$uri = $this->buildUploadUri($instance, $transferId, sprintf('%015d', $chunkIndex));
+		$uri = $this->buildUploadUri($instance, $targetUserId, $transferId, sprintf('%015d', $chunkIndex));
 
-		$options = $this->baseOptions($instance, $appPassword);
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
 		$options['body'] = $chunkStream;
 		$options['bodySize'] = $chunkSize;
 		$options['timeout'] = max(self::REQUEST_TIMEOUT, (int)ceil($chunkSize / (1024 * 1024)) * 2);
@@ -183,10 +219,10 @@ class WebDavClient {
 	 * @return int[] sorted list of chunk indexes present on the server
 	 * @throws RemoteConnectionException
 	 */
-	public function listUploadedChunks(RemoteInstance $instance, string $appPassword, string $transferId): array {
-		$uri = $this->buildUploadUri($instance, $transferId, '');
+	public function listUploadedChunks(RemoteInstance $instance, string $targetUserId, string $appPassword, string $transferId): array {
+		$uri = $this->buildUploadUri($instance, $targetUserId, $transferId, '');
 
-		$options = $this->baseOptions($instance, $appPassword);
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
 		$options['headers']['Depth'] = '1';
 		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
 		$options['body'] = '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/></d:prop></d:propfind>';
@@ -232,6 +268,7 @@ class WebDavClient {
 	 */
 	public function assembleChunkedUpload(
 		RemoteInstance $instance,
+		string $targetUserId,
 		string $appPassword,
 		string $transferId,
 		string $destinationPath,
@@ -239,10 +276,10 @@ class WebDavClient {
 		int $mtime,
 		?string $sha256 = null,
 	): void {
-		$sourceUri = $this->buildUploadUri($instance, $transferId, '.file');
-		$destinationUri = $this->buildUri($instance, $destinationPath);
+		$sourceUri = $this->buildUploadUri($instance, $targetUserId, $transferId, '.file');
+		$destinationUri = $this->buildUri($instance, $targetUserId, $destinationPath);
 
-		$options = $this->baseOptions($instance, $appPassword);
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
 		$options['headers']['Destination'] = $destinationUri;
 		$options['headers']['X-OC-MTime'] = (string)$mtime;
 		$options['headers']['OC-Total-Length'] = (string)$totalSize;
@@ -264,18 +301,18 @@ class WebDavClient {
 	 * Best-effort cleanup of a chunked upload's staging collection, e.g.
 	 * after a file is permanently abandoned (retries exhausted).
 	 */
-	public function abortChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
+	public function abortChunkedUpload(RemoteInstance $instance, string $targetUserId, string $appPassword, string $transferId): void {
 		try {
-			$uri = $this->buildUploadUri($instance, $transferId, '');
-			$this->execute('DELETE', $uri, $this->baseOptions($instance, $appPassword));
+			$uri = $this->buildUploadUri($instance, $targetUserId, $transferId, '');
+			$this->execute('DELETE', $uri, $this->baseOptions($instance, $targetUserId, $appPassword));
 		} catch (\Exception $e) {
 			$this->logger->debug('Failed to clean up abandoned chunked upload (non-fatal)', ['exception' => $e]);
 		}
 	}
 
-	private function buildUploadUri(RemoteInstance $instance, string $transferId, string $suffix): string {
+	private function buildUploadUri(RemoteInstance $instance, string $targetUserId, string $transferId, string $suffix): string {
 		$base = rtrim($instance->getUrl(), '/');
-		$user = rawurlencode($instance->getTargetUserId());
+		$user = rawurlencode($targetUserId);
 		$path = 'remote.php/dav/uploads/' . $user . '/' . rawurlencode($transferId);
 		if ($suffix !== '') {
 			$path .= '/' . $suffix;
@@ -291,11 +328,11 @@ class WebDavClient {
 	 *
 	 * @throws TransferException
 	 */
-	public function fetchSha256(RemoteInstance $instance, string $appPassword, string $path): string {
-		$uri = $this->buildUri($instance, $path);
+	public function fetchSha256(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path): string {
+		$uri = $this->buildUri($instance, $targetUserId, $path);
 
 		try {
-			$response = $this->execute('GET', $uri, $this->baseOptions($instance, $appPassword));
+			$response = $this->execute('GET', $uri, $this->baseOptions($instance, $targetUserId, $appPassword));
 		} catch (\Exception $e) {
 			throw new TransferException("Download for verification failed for '{$path}': " . $e->getMessage(), true, $e);
 		}
@@ -307,8 +344,8 @@ class WebDavClient {
 	 * @return array{size:int,etag:?string,checksum:?string}
 	 * @throws RemoteConnectionException
 	 */
-	private function propfind(RemoteInstance $instance, string $appPassword, string $path, int $depth): array {
-		$uri = $this->buildUri($instance, $path);
+	private function propfind(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path, int $depth): array {
+		$uri = $this->buildUri($instance, $targetUserId, $path);
 
 		$body = <<<XML
 <?xml version="1.0" encoding="utf-8"?>
@@ -322,7 +359,7 @@ class WebDavClient {
 </d:propfind>
 XML;
 
-		$options = $this->baseOptions($instance, $appPassword);
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
 		$options['headers']['Depth'] = (string)$depth;
 		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
 		$options['body'] = $body;
@@ -376,9 +413,9 @@ XML;
 		return ['size' => $size, 'etag' => $etag, 'checksum' => $checksum];
 	}
 
-	private function buildUri(RemoteInstance $instance, string $path): string {
+	private function buildUri(RemoteInstance $instance, string $targetUserId, string $path): string {
 		$base = rtrim($instance->getUrl(), '/');
-		$user = rawurlencode($instance->getTargetUserId());
+		$user = rawurlencode($targetUserId);
 		$encodedPath = implode('/', array_map('rawurlencode', explode('/', ltrim($path, '/'))));
 
 		return "{$base}/remote.php/dav/files/{$user}/{$encodedPath}";
@@ -387,10 +424,10 @@ XML;
 	/**
 	 * @return array{headers: array<string,string>, auth: array{0:string,1:string}, verify: bool}
 	 */
-	private function baseOptions(RemoteInstance $instance, string $appPassword): array {
+	private function baseOptions(RemoteInstance $instance, string $targetUserId, string $appPassword): array {
 		return [
 			'headers' => [],
-			'auth' => [$instance->getTargetUserId(), $appPassword],
+			'auth' => [$targetUserId, $appPassword],
 			'verify' => !$instance->getAllowSelfSigned(),
 			'timeout' => self::REQUEST_TIMEOUT,
 		];

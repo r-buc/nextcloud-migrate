@@ -44,7 +44,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/Reports', isDirectory: true);
 		$this->webDavClient->expects($this->never())->method('stat');
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_RENAME);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_RENAME);
 
 		self::assertSame(MigrationFile::STATE_MAPPED, $file->getState());
 		self::assertSame('Documents/Reports', $file->getTargetPath());
@@ -54,7 +54,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/report.pdf');
 		$this->webDavClient->method('stat')->willReturn(null);
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_RENAME);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_RENAME);
 
 		self::assertSame(MigrationFile::STATE_MAPPED, $file->getState());
 		self::assertSame('Documents/report.pdf', $file->getTargetPath());
@@ -64,7 +64,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/report.pdf');
 		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null]);
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_RENAME);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_RENAME);
 
 		self::assertSame(MigrationFile::STATE_MAPPED, $file->getState());
 		self::assertMatchesRegularExpression('#^Documents/report_migrated_\d+\.pdf$#', $file->getTargetPath());
@@ -74,7 +74,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/README');
 		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null]);
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_RENAME);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_RENAME);
 
 		self::assertMatchesRegularExpression('#^Documents/README_migrated_\d+$#', $file->getTargetPath());
 	}
@@ -83,7 +83,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/report.pdf');
 		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null]);
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_SKIP);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_SKIP);
 
 		self::assertSame(MigrationFile::STATE_SKIPPED, $file->getState());
 		self::assertNull($file->getTargetPath());
@@ -93,7 +93,7 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/report.pdf');
 		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null]);
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_OVERWRITE);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE);
 
 		self::assertSame(MigrationFile::STATE_MAPPED, $file->getState());
 		self::assertSame('Documents/report.pdf', $file->getTargetPath());
@@ -103,14 +103,14 @@ final class MappingServiceTest extends TestCase {
 		$file = $this->makeFile('Documents/report.pdf');
 
 		$this->expectException(\InvalidArgumentException::class);
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', 'not-a-real-strategy');
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', 'not-a-real-strategy');
 	}
 
 	public function testConnectionFailureDuringCollisionCheckMarksMappingFailed(): void {
 		$file = $this->makeFile('Documents/report.pdf');
 		$this->webDavClient->method('stat')->willThrowException(new RemoteConnectionException('boom', 500));
 
-		$this->mappingService->mapFile($file, new RemoteInstance(), 'secret', MappingService::STRATEGY_RENAME);
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_RENAME);
 
 		self::assertSame(MigrationFile::STATE_MAPPING_FAILED, $file->getState());
 		self::assertStringContainsString('boom', (string)$file->getLastError());

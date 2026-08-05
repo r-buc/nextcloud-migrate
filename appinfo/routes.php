@@ -15,6 +15,10 @@ return [
         ['name' => 'migration#createInstance', 'url' => '/api/v1/instances', 'verb' => 'POST'],
         ['name' => 'migration#testInstance', 'url' => '/api/v1/instances/{instanceId}/test', 'verb' => 'POST'],
         ['name' => 'migration#deleteInstance', 'url' => '/api/v1/instances/{instanceId}', 'verb' => 'DELETE'],
+        ['name' => 'migration#listRemoteUsers', 'url' => '/api/v1/instances/{instanceId}/remote-users', 'verb' => 'GET'],
+
+        // User mapping helpers
+        ['name' => 'migration#listLocalUsers', 'url' => '/api/v1/local-users', 'verb' => 'GET'],
 
         // Migration run lifecycle
         ['name' => 'migration#listRuns', 'url' => '/api/v1/runs', 'verb' => 'GET'],

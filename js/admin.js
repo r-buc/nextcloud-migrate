@@ -39,16 +39,15 @@
 
 			if (instance) {
 				currentInstanceId = instance.id;
-				form.label.value = instance.label || '';
 				form.url.value = instance.url;
-				form.targetUserId.value = instance.targetUserId;
-				form.appPassword.value = '';
+				form.adminUserId.value = instance.adminUserId;
+				form.adminAppPassword.value = '';
 				form.allowSelfSigned.checked = !!instance.allowSelfSigned;
 
 				const tested = instance.lastTestedAt
 					? new Date(instance.lastTestedAt * 1000).toLocaleString()
 					: 'never';
-				status.textContent = 'Configured: ' + instance.url + ' (' + instance.targetUserId + '). Last tested: ' + tested
+				status.textContent = 'Configured: ' + instance.url + ' (admin: ' + instance.adminUserId + '). Last tested: ' + tested
 					+ (instance.lastTestError ? ' - ' + instance.lastTestError : '');
 				deleteBtn.hidden = false;
 				testBtn.hidden = false;
@@ -68,10 +67,9 @@
 		apiFetch('/instances', {
 			method: 'POST',
 			body: JSON.stringify({
-				label: form.label.value,
 				url: form.url.value,
-				targetUserId: form.targetUserId.value,
-				appPassword: form.appPassword.value,
+				adminUserId: form.adminUserId.value,
+				adminAppPassword: form.adminAppPassword.value,
 				allowSelfSigned: form.allowSelfSigned.checked,
 			}),
 		}).then(loadInstance).catch(function (e) {
@@ -135,18 +133,91 @@
 		});
 	}
 
+	// --- User mapping table (local users, with an expert-mode manual
+	// target app password column) ---
+
+	function setExpertMode(enabled) {
+		document.querySelectorAll('.ncm-expert-col').forEach(function (el) {
+			el.hidden = !enabled;
+		});
+	}
+
+	function loadLocalUsers() {
+		return apiFetch('/local-users').then(function (users) {
+			const tbody = document.querySelector('#ncm-user-mappings-table tbody');
+			tbody.innerHTML = '';
+
+			users.forEach(function (user) {
+				const row = document.createElement('tr');
+
+				const includeCell = document.createElement('td');
+				const includeCheckbox = document.createElement('input');
+				includeCheckbox.type = 'checkbox';
+				includeCheckbox.className = 'ncm-map-include';
+				includeCheckbox.dataset.sourceUserId = user.id;
+				includeCell.appendChild(includeCheckbox);
+				row.appendChild(includeCell);
+
+				const nameCell = document.createElement('td');
+				nameCell.textContent = user.displayName ? user.displayName + ' (' + user.id + ')' : user.id;
+				row.appendChild(nameCell);
+
+				const targetCell = document.createElement('td');
+				const targetInput = document.createElement('input');
+				targetInput.type = 'text';
+				targetInput.className = 'ncm-map-target';
+				targetInput.value = user.id;
+				targetCell.appendChild(targetInput);
+				row.appendChild(targetCell);
+
+				const passwordCell = document.createElement('td');
+				passwordCell.className = 'ncm-expert-col';
+				passwordCell.hidden = !document.getElementById('ncm-expert-mode').checked;
+				const passwordInput = document.createElement('input');
+				passwordInput.type = 'password';
+				passwordInput.className = 'ncm-map-password';
+				passwordCell.appendChild(passwordInput);
+				row.appendChild(passwordCell);
+
+				tbody.appendChild(row);
+			});
+		});
+	}
+
+	document.getElementById('ncm-expert-mode').addEventListener('change', function (event) {
+		setExpertMode(event.target.checked);
+	});
+
 	document.getElementById('ncm-create-run-form').addEventListener('submit', function (event) {
 		event.preventDefault();
 		const form = event.target;
-		const userMappings = {};
-		form.userMappings.value.split('\n').forEach(function (line) {
-			const parts = line.split(':').map(function (s) {
-				return s.trim();
-			});
-			if (parts.length === 2 && parts[0] && parts[1]) {
-				userMappings[parts[0]] = parts[1];
+		const expertMode = document.getElementById('ncm-expert-mode').checked;
+
+		const userMappings = [];
+		document.querySelectorAll('#ncm-user-mappings-table tbody tr').forEach(function (row) {
+			const includeCheckbox = row.querySelector('.ncm-map-include');
+			if (!includeCheckbox.checked) {
+				return;
 			}
+			const targetUserId = row.querySelector('.ncm-map-target').value.trim();
+			if (!targetUserId) {
+				return;
+			}
+			const mapping = {
+				sourceUserId: includeCheckbox.dataset.sourceUserId,
+				targetUserId: targetUserId,
+				mode: expertMode ? 'manual' : 'auto',
+			};
+			if (expertMode) {
+				mapping.appPassword = row.querySelector('.ncm-map-password').value;
+			}
+			userMappings.push(mapping);
 		});
+
+		if (userMappings.length === 0) {
+			OC.Notification.showTemporary('Select at least one user to migrate.');
+			return;
+		}
 
 		apiFetch('/runs', {
 			method: 'POST',
@@ -155,7 +226,6 @@
 				userMappings: userMappings,
 			}),
 		}).then(function (run) {
-			form.reset();
 			showRunDetail(run.id);
 		}).catch(function (e) {
 			OC.Notification.showTemporary('Failed to create run: ' + e.message);
@@ -176,9 +246,13 @@
 	});
 
 	document.getElementById('ncm-run-refresh').addEventListener('click', refreshRunDetail);
-	document.getElementById('ncm-run-new').addEventListener('click', showCreateForm);
+	document.getElementById('ncm-run-new').addEventListener('click', function () {
+		showCreateForm();
+		loadLocalUsers();
+	});
 
 	loadInstance();
+	loadLocalUsers();
 	loadCurrentRun();
 }());
 

@@ -12,20 +12,23 @@
 
 		<form id="ncm-instance-form">
 			<p>
-				<label for="ncm-instance-label">Label</label>
-				<input type="text" id="ncm-instance-label" name="label" placeholder="e.g. Backup instance">
-			</p>
-			<p>
-				<label for="ncm-instance-url">Target URL</label>
+				<label for="ncm-instance-url">URL</label>
 				<input type="url" id="ncm-instance-url" name="url" placeholder="https://target.example.com" required>
 			</p>
 			<p>
-				<label for="ncm-instance-user">Target username</label>
-				<input type="text" id="ncm-instance-user" name="targetUserId" required>
+				<label for="ncm-instance-user">Admin username</label>
+				<input type="text" id="ncm-instance-user" name="adminUserId" required>
 			</p>
 			<p>
-				<label for="ncm-instance-password">Target app password</label>
-				<input type="password" id="ncm-instance-password" name="appPassword" required>
+				<label for="ncm-instance-password">Admin app password</label>
+				<input type="password" id="ncm-instance-password" name="adminAppPassword" required>
+			</p>
+			<p class="settings-hint">
+				This account must have <strong>admin</strong> privileges on the
+				target instance. It is used only to create or reset target user
+				accounts via the Provisioning API when starting a migration - never
+				to write files, since Nextcloud's WebDAV has no admin-bypass for
+				another user's files.
 			</p>
 			<p>
 				<label for="ncm-instance-selfsigned">Allow self-signed certificate</label>
@@ -51,11 +54,31 @@
 					<option value="overwrite">Overwrite on collision</option>
 				</select>
 			</p>
+
 			<p>
-				<label for="ncm-run-mappings">User mappings</label>
-				<textarea id="ncm-run-mappings" name="userMappings" placeholder="sourceUser1:targetUser1&#10;sourceUser2:targetUser2" rows="4" required></textarea>
+				<label for="ncm-expert-mode">Expert mode</label>
+				<input type="checkbox" id="ncm-expert-mode">
 			</p>
-			<p class="settings-hint">One mapping per line, format <code>sourceUser:targetUser</code>.</p>
+			<p class="settings-hint">
+				By default, each selected user's target account is created (or its
+				password reset) automatically via the admin credentials above - no
+				need to know each user's own password. Enable expert mode to supply
+				a target app password yourself instead, without touching the
+				target account at all.
+			</p>
+
+			<table id="ncm-user-mappings-table">
+				<thead>
+					<tr>
+						<th></th>
+						<th>Local user</th>
+						<th>Target username</th>
+						<th class="ncm-expert-col" hidden>Target app password</th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			</table>
+
 			<p>
 				<button type="submit">Start migration</button>
 			</p>

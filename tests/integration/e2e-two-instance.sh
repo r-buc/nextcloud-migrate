@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+#
+# End-to-end integration test for the nextcloud_migrate app: spins up two
+# fresh, throwaway Nextcloud containers (source + target) on a private
+# podman network, installs the app on the source, drives a full migration
+# run through the REST API + background jobs exactly like the admin UI
+# would, and verifies the migrated files land on the target with matching
+# SHA-256 checksums and an identical `ls -lR` structure.
+#
+# Exercises BOTH default "auto" mapping modes in one run:
+#   - alice: does NOT exist on the target yet -> exercises auto-CREATE.
+#   - bob:   already exists on the target      -> exercises auto-RESET.
+#
+# Test data deliberately includes both a duplicate folder name (Documents/)
+# AND a duplicate file name (Documents/shared.txt, different content per
+# user) shared across alice and bob, plus a uniquely-named file per user
+# (alice.txt/bob.txt) - this combination is what originally caught a real
+# unique-constraint bug where two users' identically-named paths collided
+# in the same run (fixed by scoping migrate_files' uniqueness per user_map,
+# not just per run).
+#
+# Requirements: `podman` available directly on PATH (run this on a real
+# host, not through any sandbox-specific escape hatch). Nothing here is
+# specific to any particular development sandbox.
+#
+# Usage:
+#   tests/integration/e2e-two-instance.sh
+#
+# Safe to re-run any time: always tears down and recreates ncm-src/ncm-tgt
+# from scratch first (per the project's "no schema migration during v1
+# development - always use fresh instances" policy).
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+STAGING_DIR="/tmp/ncm-custom-apps-e2e"
+NETWORK="ncm-e2e-net"
+SRC=ncm-e2e-src
+TGT=ncm-e2e-tgt
+IMAGE="docker.io/library/nextcloud:28-apache"
+ADMIN_USER=admin
+ADMIN_PASS=adminpass
+TARGET_ADMIN_PASS=adminpass
+
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*" >&2; cleanup_note; exit 1; }
+step() { echo; echo "=== $* ==="; }
+
+cleanup_note() {
+	echo "(containers '$SRC'/'$TGT' left running for inspection; re-run this script to reset)"
+}
+
+run_occ() {
+	local container="$1"
+	shift
+	podman exec -u www-data "$container" php /var/www/html/occ "$@"
+}
+
+wait_for_nextcloud() {
+	local container="$1"
+	local i
+	for i in $(seq 1 60); do
+		if podman exec "$container" sh -c 'curl -s -f http://localhost/status.php' >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 2
+	done
+	fail "$container did not become ready in time"
+}
+
+# Drains self-perpetuating NextcloudMigrate background jobs (transfer/verify
+# workers re-queue themselves each run) until either the run reaches one of
+# the given terminal states, or we give up after $2 rounds.
+drain_jobs_until() {
+	local run_id="$1"
+	local max_rounds="$2"
+	shift 2
+	local terminal_states=("$@")
+	local round state job_ids id
+
+	for round in $(seq 1 "$max_rounds"); do
+		state="$(api_get "/runs/$run_id" | grep -oP '"state":"\K[^"]+')"
+		for want in "${terminal_states[@]}"; do
+			if [[ "$state" == "$want" ]]; then
+				return 0
+			fi
+		done
+
+		job_ids="$(run_occ "$SRC" background-job:list 2>/dev/null | grep 'NextcloudMigrate' | grep -v 'null' | awk -F'|' '{print $2}' | tr -d ' ')"
+		if [[ -z "$job_ids" ]]; then
+			sleep 1
+			continue
+		fi
+		for id in $job_ids; do
+			run_occ "$SRC" background-job:execute --force-execute "$id" >/dev/null 2>&1 || true
+		done
+	done
+
+	state="$(api_get "/runs/$run_id" | grep -oP '"state":"\K[^"]+')"
+	fail "run $run_id did not reach [${terminal_states[*]}] within $max_rounds rounds (stuck at '$state')"
+}
+
+# --- REST API helpers (browser-session simulation, same flow admin.js uses) ---
+
+login_admin() {
+	local token
+	podman exec "$SRC" sh -c "curl -s -c /tmp/e2e_cookies -b /tmp/e2e_cookies http://localhost/login -o /tmp/e2e_login.html"
+	token="$(podman exec "$SRC" sh -c 'grep -oP "data-requesttoken=\"\K[^\"]+" /tmp/e2e_login.html | head -1')"
+	podman exec "$SRC" sh -c "curl -s -c /tmp/e2e_cookies -b /tmp/e2e_cookies -X POST http://localhost/login \
+		--data-urlencode 'user=$ADMIN_USER' --data-urlencode 'password=$ADMIN_PASS' \
+		--data-urlencode 'requesttoken=$token' --data-urlencode 'timezone-offset=0' --data-urlencode 'timezone=UTC' \
+		-o /dev/null -w '%{http_code}'" | grep -q '^303$' || fail "admin login POST did not redirect (303)"
+	podman exec "$SRC" sh -c "curl -s -c /tmp/e2e_cookies -b /tmp/e2e_cookies http://localhost/apps/dashboard/ -o /tmp/e2e_dash.html"
+	API_TOKEN="$(podman exec "$SRC" sh -c 'grep -oP "data-requesttoken=\"\K[^\"]+" /tmp/e2e_dash.html | head -1')"
+	[[ -n "$API_TOKEN" ]] || fail "could not extract post-login CSRF token"
+}
+
+api_get() {
+	podman exec "$SRC" sh -c "curl -s -b /tmp/e2e_cookies http://localhost/apps/nextcloud_migrate/api/v1$1 -H 'requesttoken: $API_TOKEN'"
+}
+
+api_call() {
+	local method="$1" path="$2" body="${3:-}"
+	podman exec "$SRC" sh -c "curl -s -b /tmp/e2e_cookies -X $method http://localhost/apps/nextcloud_migrate/api/v1$path \
+		-H 'requesttoken: $API_TOKEN' -H 'Content-Type: application/json' ${body:+-d '$body'}"
+}
+
+api_status() {
+	local method="$1" path="$2" body="${3:-}"
+	podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -b /tmp/e2e_cookies -X $method http://localhost/apps/nextcloud_migrate/api/v1$path \
+		-H 'requesttoken: $API_TOKEN' -H 'Content-Type: application/json' ${body:+-d '$body'}"
+}
+
+# --- Setup ---
+
+step "Resetting containers and network"
+podman rm -f -v "$SRC" "$TGT" >/dev/null 2>&1 || true
+podman network rm "$NETWORK" >/dev/null 2>&1 || true
+podman network create "$NETWORK" >/dev/null
+
+step "Staging app code (excluding .git/vendor/composer.lock)"
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR/nextcloud_migrate"
+cp -r "$REPO_ROOT/." "$STAGING_DIR/nextcloud_migrate/"
+rm -rf "$STAGING_DIR/nextcloud_migrate/.git" "$STAGING_DIR/nextcloud_migrate/vendor" "$STAGING_DIR/nextcloud_migrate/composer.lock"
+
+step "Starting source and target containers"
+podman run -d --name "$SRC" --network "$NETWORK" \
+	--user www-data --userns="keep-id:uid=33,gid=33" --cap-add=NET_BIND_SERVICE \
+	-v "$STAGING_DIR:/var/www/html/custom_apps:Z" \
+	-e SQLITE_DATABASE=nextcloud -e NEXTCLOUD_ADMIN_USER="$ADMIN_USER" -e NEXTCLOUD_ADMIN_PASSWORD="$ADMIN_PASS" \
+	"$IMAGE" >/dev/null
+podman run -d --name "$TGT" --network "$NETWORK" \
+	--user www-data --userns="keep-id:uid=33,gid=33" --cap-add=NET_BIND_SERVICE \
+	-e SQLITE_DATABASE=nextcloud -e NEXTCLOUD_ADMIN_USER="$ADMIN_USER" -e NEXTCLOUD_ADMIN_PASSWORD="$TARGET_ADMIN_PASS" \
+	"$IMAGE" >/dev/null
+
+wait_for_nextcloud "$SRC"
+wait_for_nextcloud "$TGT"
+# The target must trust the hostname the source's outbound WebDAV/OCS calls
+# use in the request URL (its own container name), or it rejects them as an
+# "untrusted domain". The source doesn't need this: we only ever reach it
+# as localhost (via podman exec curl) in this script.
+run_occ "$TGT" config:system:set trusted_domains 1 --value="$TGT" >/dev/null
+# Disable Nextcloud's default demo-content skeleton for new accounts on the
+# target, so every new/reset user's home folder starts truly empty - keeps
+# the later ls -lR structural comparison meaningful (otherwise it would be
+# full of unrelated "Welcome to Nextcloud" sample files).
+run_occ "$TGT" config:system:set skeletondirectory --value="" >/dev/null
+
+step "Enabling nextcloud_migrate on the source instance"
+run_occ "$SRC" app:enable nextcloud_migrate || fail "app:enable failed"
+run_occ "$SRC" app:list | grep -q nextcloud_migrate || fail "app not listed as enabled"
+pass "app enabled, schema created fresh"
+
+step "Creating local (source) test users + sample files"
+podman exec -u www-data -e OC_PASS=AliceTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env alice
+podman exec -u www-data -e OC_PASS=BobTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env bob
+# Documents/ and Documents/shared.txt intentionally exist for BOTH users
+# with the SAME relative path but DIFFERENT content, to exercise
+# per-(run,user)-scoped uniqueness (a real bug once collided across users
+# sharing a folder/file name - see migrate_file_unique_idx). alice.txt/
+# bob.txt are uniquely named per user, to confirm content never crosses
+# between users during migration.
+podman exec "$SRC" sh -c "mkdir -p /var/www/html/data/alice/files/Documents
+ echo 'hello from alice' > /var/www/html/data/alice/files/Documents/alice.txt
+echo 'shared-name file, alice content' > /var/www/html/data/alice/files/Documents/shared.txt"
+podman exec "$SRC" sh -c "mkdir -p /var/www/html/data/bob/files/Documents
+ echo 'hello from bob' > /var/www/html/data/bob/files/Documents/bob.txt
+echo 'shared-name file, bob content' > /var/www/html/data/bob/files/Documents/shared.txt"
+run_occ "$SRC" files:scan alice >/dev/null
+run_occ "$SRC" files:scan bob >/dev/null
+
+step "Pre-creating 'bob' on the target (to exercise auto-RESET), leaving 'alice' absent (to exercise auto-CREATE)"
+podman exec -u www-data -e OC_PASS=BobExistingTargetPassphrase2026 "$TGT" php /var/www/html/occ user:add --password-from-env bob
+
+step "Logging in as admin on the source and driving the REST API"
+login_admin
+pass "authenticated session + CSRF token acquired"
+
+CREATE_STATUS="$(api_status POST /instances "{\"url\":\"http://$TGT\",\"adminUserId\":\"$ADMIN_USER\",\"adminAppPassword\":\"$TARGET_ADMIN_PASS\",\"allowSelfSigned\":true}")"
+[[ "$CREATE_STATUS" == "200" || "$CREATE_STATUS" == "201" ]] || fail "createInstance returned $CREATE_STATUS"
+INSTANCE_ID="$(api_get /instances | grep -oP '"id":\K[0-9]+' | head -1)"
+pass "target instance configured (id=$INSTANCE_ID)"
+
+TEST_BODY="$(api_call POST "/instances/$INSTANCE_ID/test")"
+echo "$TEST_BODY" | grep -q '"success":true' || fail "instance test failed: $TEST_BODY"
+pass "target reachable, admin provisioning credentials valid"
+
+LOCAL_USERS="$(api_get /local-users)"
+echo "$LOCAL_USERS" | grep -q '"id":"alice"' || fail "alice missing from /local-users"
+echo "$LOCAL_USERS" | grep -q '"id":"bob"' || fail "bob missing from /local-users"
+pass "local user list includes alice and bob"
+
+step "Creating migration run (both users in default 'auto' mode)"
+RUN_BODY="$(api_call POST /runs '{"collisionStrategy":"rename","userMappings":[{"sourceUserId":"alice","targetUserId":"alice","mode":"auto"},{"sourceUserId":"bob","targetUserId":"bob","mode":"auto"}]}')"
+RUN_ID="$(echo "$RUN_BODY" | grep -oP '"id":\K[0-9]+' | head -1)"
+[[ -n "$RUN_ID" ]] || fail "createRun failed: $RUN_BODY"
+pass "run created (id=$RUN_ID) - alice account should now exist on target, bob's password should be reset"
+
+step "Dry run (validate target user credentials + discover files)"
+api_call POST "/runs/$RUN_ID/dry-run" >/dev/null
+drain_jobs_until "$RUN_ID" 30 dry_run_ready validation_failed
+STATE="$(api_get "/runs/$RUN_ID" | grep -oP '"state":"\K[^"]+')"
+[[ "$STATE" == "dry_run_ready" ]] || fail "run did not reach dry_run_ready (state=$STATE) - check per-user credential validation"
+pass "dry run succeeded: both auto-created/reset credentials validated over WebDAV"
+
+step "Approving and running the migration to completion"
+api_call POST "/runs/$RUN_ID/approve" >/dev/null
+drain_jobs_until "$RUN_ID" 60 completed completed_with_errors failed
+STATE="$(api_get "/runs/$RUN_ID" | grep -oP '"state":"\K[^"]+')"
+[[ "$STATE" == "completed" ]] || fail "run finished in state '$STATE', expected 'completed'"
+pass "run completed"
+
+step "Verifying migrated files on the target instance"
+run_occ "$TGT" files:scan alice >/dev/null
+run_occ "$TGT" files:scan bob >/dev/null
+
+ALICE_SRC_SUM="$(podman exec "$SRC" sha256sum /var/www/html/data/alice/files/Documents/alice.txt | awk '{print $1}')"
+ALICE_TGT_SUM="$(podman exec "$TGT" sha256sum /var/www/html/data/alice/files/Documents/alice.txt 2>/dev/null | awk '{print $1}')" \
+	|| fail "alice.txt not found on target (auto-CREATE path failed)"
+[[ "$ALICE_SRC_SUM" == "$ALICE_TGT_SUM" ]] || fail "alice.txt checksum mismatch (src=$ALICE_SRC_SUM tgt=$ALICE_TGT_SUM)"
+pass "alice.txt landed on target with matching checksum (auto-CREATE path verified)"
+
+BOB_SRC_SUM="$(podman exec "$SRC" sha256sum /var/www/html/data/bob/files/Documents/bob.txt | awk '{print $1}')"
+BOB_TGT_SUM="$(podman exec "$TGT" sha256sum /var/www/html/data/bob/files/Documents/bob.txt 2>/dev/null | awk '{print $1}')" \
+	|| fail "bob.txt not found on target (auto-RESET path failed)"
+[[ "$BOB_SRC_SUM" == "$BOB_TGT_SUM" ]] || fail "bob.txt checksum mismatch (src=$BOB_SRC_SUM tgt=$BOB_TGT_SUM)"
+pass "bob.txt landed on target with matching checksum (auto-RESET path verified)"
+
+# shared.txt exists at the SAME relative path for both alice and bob but with
+# DIFFERENT content - confirms the per-(run,user_map) uniqueness fix actually
+# keeps both users' rows/content distinct instead of colliding or one
+# overwriting the other's transfer.
+ALICE_SHARED_SRC_SUM="$(podman exec "$SRC" sha256sum /var/www/html/data/alice/files/Documents/shared.txt | awk '{print $1}')"
+ALICE_SHARED_TGT_SUM="$(podman exec "$TGT" sha256sum /var/www/html/data/alice/files/Documents/shared.txt 2>/dev/null | awk '{print $1}')" \
+	|| fail "alice's Documents/shared.txt not found on target"
+[[ "$ALICE_SHARED_SRC_SUM" == "$ALICE_SHARED_TGT_SUM" ]] || fail "alice's shared.txt checksum mismatch"
+BOB_SHARED_SRC_SUM="$(podman exec "$SRC" sha256sum /var/www/html/data/bob/files/Documents/shared.txt | awk '{print $1}')"
+BOB_SHARED_TGT_SUM="$(podman exec "$TGT" sha256sum /var/www/html/data/bob/files/Documents/shared.txt 2>/dev/null | awk '{print $1}')" \
+	|| fail "bob's Documents/shared.txt not found on target"
+[[ "$BOB_SHARED_SRC_SUM" == "$BOB_SHARED_TGT_SUM" ]] || fail "bob's shared.txt checksum mismatch"
+[[ "$ALICE_SHARED_SRC_SUM" != "$BOB_SHARED_SRC_SUM" ]] || fail "test data bug: alice/bob shared.txt should differ in content"
+pass "duplicate-named Documents/shared.txt migrated correctly and distinctly for both users"
+
+step "Structural comparison: ls -lR of each user's Documents/ on source vs target"
+# Strip "total N" block-count summary lines (filesystem-dependent noise, not
+# meaningful for correctness) before diffing; everything else (names, sizes,
+# perms, and mtimes - preserved via X-OC-MTime - is expected to match exactly.
+for user in alice bob; do
+	SRC_LISTING="$(podman exec "$SRC" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ')"
+	TGT_LISTING="$(podman exec "$TGT" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ')"
+	if [[ "$SRC_LISTING" != "$TGT_LISTING" ]]; then
+		echo "--- source ($user) ---"
+		echo "$SRC_LISTING"
+		echo "--- target ($user) ---"
+		echo "$TGT_LISTING"
+		fail "ls -lR mismatch for $user's Documents/ between source and target"
+	fi
+done
+pass "ls -lR of Documents/ matches exactly between source and target for both users"
+
+step "Cleaning up"
+podman rm -f -v "$SRC" "$TGT" >/dev/null 2>&1 || true
+podman network rm "$NETWORK" >/dev/null 2>&1 || true
+rm -rf "$STAGING_DIR"
+
+echo
+echo "=================================================="
+echo " ALL CHECKS PASSED"
+echo "=================================================="

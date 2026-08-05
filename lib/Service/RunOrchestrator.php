@@ -44,6 +44,7 @@ class RunOrchestrator {
 		private UserMapMapper $userMapMapper,
 		private MigrationFileMapper $fileMapper,
 		private WebDavClient $webDavClient,
+		private ProvisioningClient $provisioningClient,
 		private CredentialService $credentialService,
 		private ReportService $reportService,
 		private EventLogger $eventLogger,
@@ -53,22 +54,73 @@ class RunOrchestrator {
 	}
 
 	/**
-	 * @param array<string,string> $userIdMap sourceUserId => targetUserId
+	 * @param array<array{sourceUserId: string, targetUserId: string, mode?: string, appPassword?: string}> $mappings
+	 *        mode defaults to 'auto': the target user is created (if it
+	 *        doesn't exist on the remote instance yet) or has its password
+	 *        reset (if it does) via the OCS Provisioning API, using the
+	 *        instance's admin credential - no manual per-user app password
+	 *        needed. mode 'manual' ("expert mode") uses an app password the
+	 *        admin already obtained from that specific target user instead,
+	 *        without touching their account via the admin API at all.
+	 * @throws \InvalidArgumentException
+	 * @throws RemoteConnectionException if an 'auto' mapping's create/reset call fails
 	 */
 	public function createRun(
 		string $createdBy,
 		int $instanceId,
 		string $collisionStrategy,
-		array $userIdMap,
+		array $mappings,
 	): MigrationRun {
+		if ($mappings === []) {
+			throw new \InvalidArgumentException('At least one user mapping is required');
+		}
+
+		$instance = $this->instanceMapper->find($instanceId);
 		$now = time();
+
+		// Resolve every mapping's target app password up front - including
+		// any admin-API create/reset calls - before creating any DB rows,
+		// so a failure here doesn't leave a half-created run behind.
+		$remoteUsers = null;
+		$resolved = [];
+		foreach ($mappings as $mapping) {
+			$sourceUserId = (string)($mapping['sourceUserId'] ?? '');
+			$targetUserId = (string)($mapping['targetUserId'] ?? '');
+			$mode = (string)($mapping['mode'] ?? 'auto');
+			if ($sourceUserId === '' || $targetUserId === '') {
+				throw new \InvalidArgumentException('Each mapping requires sourceUserId and targetUserId');
+			}
+
+			if ($mode === 'manual') {
+				$appPassword = (string)($mapping['appPassword'] ?? '');
+				if ($appPassword === '') {
+					throw new \InvalidArgumentException("An app password is required for manually-mapped user '{$targetUserId}'");
+				}
+			} elseif ($mode === 'auto') {
+				if ($remoteUsers === null) {
+					$adminPassword = $this->credentialService->decrypt($instance->getAdminAppPasswordEncrypted());
+					$remoteUsers = array_flip($this->provisioningClient->listUsers($instance, $instance->getAdminUserId(), $adminPassword));
+				}
+				$adminPassword ??= $this->credentialService->decrypt($instance->getAdminAppPasswordEncrypted());
+				$appPassword = bin2hex(random_bytes(24));
+				if (isset($remoteUsers[$targetUserId])) {
+					$this->provisioningClient->resetUserPassword($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $appPassword);
+				} else {
+					$this->provisioningClient->createUser($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $appPassword);
+				}
+			} else {
+				throw new \InvalidArgumentException("Unknown mapping mode '{$mode}'");
+			}
+
+			$resolved[] = ['sourceUserId' => $sourceUserId, 'targetUserId' => $targetUserId, 'appPassword' => $appPassword];
+		}
 
 		$run = new MigrationRun();
 		$run->setUuid(UuidGenerator::v4());
 		$run->setInstanceId($instanceId);
 		$run->setState(MigrationRun::STATE_CREATED);
 		$run->setCollisionStrategy($collisionStrategy);
-		$run->setTotalUsers(count($userIdMap));
+		$run->setTotalUsers(count($resolved));
 		$run->setTotalFiles(0);
 		$run->setTransferredFiles(0);
 		$run->setVerifiedFiles(0);
@@ -80,11 +132,12 @@ class RunOrchestrator {
 		$run->setUpdatedAt($now);
 		$run = $this->runMapper->insert($run);
 
-		foreach ($userIdMap as $sourceUserId => $targetUserId) {
+		foreach ($resolved as $entry) {
 			$userMap = new UserMap();
 			$userMap->setRunId($run->getId());
-			$userMap->setSourceUserId($sourceUserId);
-			$userMap->setTargetUserId($targetUserId);
+			$userMap->setSourceUserId($entry['sourceUserId']);
+			$userMap->setTargetUserId($entry['targetUserId']);
+			$userMap->setTargetAppPasswordEncrypted($this->credentialService->encrypt($entry['appPassword']));
 			$userMap->setState(UserMap::STATE_PENDING);
 			$userMap->setTotalFiles(0);
 			$userMap->setTransferredFiles(0);
@@ -103,6 +156,12 @@ class RunOrchestrator {
 	 * off discovery. This is synchronous (a single connectivity check is
 	 * cheap) but discovery itself runs in DiscoveryJob.
 	 */
+	/**
+	 * Validates connectivity to the target instance and every mapped
+	 * user's own WebDAV credential, then kicks off discovery on success.
+	 * This is synchronous (each check is cheap) but discovery itself runs
+	 * in DiscoveryJob.
+	 */
 	public function startValidationAndDiscovery(int $runId): MigrationRun {
 		$run = $this->runMapper->find($runId);
 		$instance = $this->instanceMapper->find($run->getInstanceId());
@@ -112,11 +171,19 @@ class RunOrchestrator {
 		$this->runMapper->update($run);
 
 		try {
-			$appPassword = $this->credentialService->decrypt($instance->getAppPasswordEncrypted());
-			$this->webDavClient->testConnection($instance, $appPassword);
+			$this->webDavClient->testConnection($instance);
+
+			foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+				$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
+				try {
+					$this->webDavClient->testUserCredentials($instance, $userMap->getTargetUserId(), $appPassword);
+				} catch (RemoteConnectionException $e) {
+					throw new RemoteConnectionException("Credential check failed for target user '{$userMap->getTargetUserId()}': " . $e->getMessage(), $e->getCode(), $e);
+				}
+			}
 		} catch (RemoteConnectionException $e) {
 			$run->setState(MigrationRun::STATE_VALIDATION_FAILED);
-			$run->setErrorMessage('Could not connect to target instance: ' . $e->getMessage());
+			$run->setErrorMessage('Could not validate target instance: ' . $e->getMessage());
 			$run->setUpdatedAt(time());
 			$this->runMapper->update($run);
 			$this->eventLogger->log($runId, 'validation_failed', $run->getErrorMessage(), 'error');
@@ -124,7 +191,7 @@ class RunOrchestrator {
 			return $run;
 		}
 
-		$this->eventLogger->log($runId, 'validation_succeeded', 'Target instance reachable and credentials valid');
+		$this->eventLogger->log($runId, 'validation_succeeded', 'Target instance reachable and all mapped users\' credentials valid');
 
 		$run->setState(MigrationRun::STATE_DISCOVERING);
 		$run->setUpdatedAt(time());

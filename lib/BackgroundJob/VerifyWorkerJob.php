@@ -9,6 +9,7 @@ use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\MigrationRunMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
+use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\CredentialService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCA\NextcloudMigrate\Service\VerificationService;
@@ -34,6 +35,7 @@ class VerifyWorkerJob extends QueuedJob {
 		private MigrationRunMapper $runMapper,
 		private MigrationFileMapper $fileMapper,
 		private RemoteInstanceMapper $instanceMapper,
+		private UserMapMapper $userMapMapper,
 		private CredentialService $credentialService,
 		private VerificationService $verificationService,
 		private RunOrchestrator $runOrchestrator,
@@ -79,8 +81,9 @@ class VerifyWorkerJob extends QueuedJob {
 
 		try {
 			$instance = $this->instanceMapper->find($run->getInstanceId());
-			$appPassword = $this->credentialService->decrypt($instance->getAppPasswordEncrypted());
-			$this->verificationService->verifyFile($file, $instance, $appPassword);
+			$userMap = $this->userMapMapper->find($file->getUserMapId());
+			$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
+			$this->verificationService->verifyFile($file, $instance, $userMap->getTargetUserId(), $appPassword);
 		} catch (\Throwable $e) {
 			$this->logger->error('Verify worker failed unexpectedly', [
 				'app' => 'nextcloud_migrate',

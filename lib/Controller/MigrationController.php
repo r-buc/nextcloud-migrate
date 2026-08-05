@@ -10,6 +10,7 @@ use OCA\NextcloudMigrate\Db\RemoteInstance;
 use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
 use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
 use OCA\NextcloudMigrate\Service\CredentialService;
+use OCA\NextcloudMigrate\Service\ProvisioningClient;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCA\NextcloudMigrate\Service\WebDavClient;
 use OCP\AppFramework\Controller;
@@ -17,6 +18,7 @@ use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IRequest;
+use OCP\IUserManager;
 use OCP\IUserSession;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 
@@ -34,10 +36,12 @@ class MigrationController extends Controller {
 	public function __construct(
 		IRequest $request,
 		private IUserSession $userSession,
+		private IUserManager $userManager,
 		private RemoteInstanceMapper $instanceMapper,
 		private MigrationRunMapper $runMapper,
 		private CredentialService $credentialService,
 		private WebDavClient $webDavClient,
+		private ProvisioningClient $provisioningClient,
 		private RunOrchestrator $runOrchestrator,
 	) {
 		parent::__construct('nextcloud_migrate', $request);
@@ -50,11 +54,56 @@ class MigrationController extends Controller {
 	}
 
 	/**
+	 * Lists local (source) users, for populating the migration run's user
+	 * mapping picker.
+	 *
+	 * @return JSONResponse array of {id, displayName}
+	 */
+	public function listLocalUsers(): JSONResponse {
+		$users = [];
+		foreach ($this->userManager->search('') as $user) {
+			$users[] = ['id' => $user->getUID(), 'displayName' => $user->getDisplayName()];
+		}
+
+		return new JSONResponse($users);
+	}
+
+	/**
+	 * Lists remote (target) users via the OCS Provisioning API, using the
+	 * instance's admin credential - for populating the 'auto' mapping mode's
+	 * default target username suggestion.
+	 */
+	public function listRemoteUsers(int $instanceId): JSONResponse {
+		try {
+			$instance = $this->ownedInstance($instanceId);
+		} catch (DoesNotExistException) {
+			return new JSONResponse(['error' => 'Instance not found'], Http::STATUS_NOT_FOUND);
+		}
+		if ($instance === null) {
+			return new JSONResponse(['error' => 'Instance not found'], Http::STATUS_NOT_FOUND);
+		}
+
+		try {
+			$adminPassword = $this->credentialService->decrypt($instance->getAdminAppPasswordEncrypted());
+			$users = $this->provisioningClient->listUsers($instance, $instance->getAdminUserId(), $adminPassword);
+
+			return new JSONResponse($users);
+		} catch (RemoteConnectionException $e) {
+			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_GATEWAY);
+		}
+	}
+
+	/**
 	 * Creates or updates the admin's single target instance (v1 only
 	 * supports one target per admin - re-submitting this form replaces the
 	 * existing configuration rather than adding another one).
+	 *
+	 * adminUserId/adminAppPassword must belong to an account with admin
+	 * privileges on the target instance: they are used only for the OCS
+	 * Provisioning API (listing/creating/resetting target users), never for
+	 * WebDAV file writes (see RemoteInstance docblock).
 	 */
-	public function createInstance(string $label, string $url, string $targetUserId, string $appPassword, bool $allowSelfSigned = false): JSONResponse {
+	public function createInstance(string $url, string $adminUserId, string $adminAppPassword, bool $allowSelfSigned = false): JSONResponse {
 		if (!preg_match('#^https://#i', $url) && !($allowSelfSigned && preg_match('#^http://#i', $url))) {
 			return new JSONResponse(['error' => 'Target URL must use HTTPS'], Http::STATUS_BAD_REQUEST);
 		}
@@ -67,10 +116,9 @@ class MigrationController extends Controller {
 			$instance->setCreatedBy($this->currentUserId());
 			$instance->setCreatedAt(time());
 		}
-		$instance->setLabel($label);
 		$instance->setUrl(rtrim($url, '/'));
-		$instance->setTargetUserId($targetUserId);
-		$instance->setAppPasswordEncrypted($this->credentialService->encrypt($appPassword));
+		$instance->setAdminUserId($adminUserId);
+		$instance->setAdminAppPasswordEncrypted($this->credentialService->encrypt($adminAppPassword));
 		$instance->setAllowSelfSigned($allowSelfSigned);
 		$instance = $isNew ? $this->instanceMapper->insert($instance) : $this->instanceMapper->update($instance);
 
@@ -89,8 +137,9 @@ class MigrationController extends Controller {
 
 		$now = time();
 		try {
-			$appPassword = $this->credentialService->decrypt($instance->getAppPasswordEncrypted());
-			$this->webDavClient->testConnection($instance, $appPassword);
+			$this->webDavClient->testConnection($instance);
+			$adminPassword = $this->credentialService->decrypt($instance->getAdminAppPasswordEncrypted());
+			$this->provisioningClient->listUsers($instance, $instance->getAdminUserId(), $adminPassword);
 			$instance->setLastTestedAt($now);
 			$instance->setLastTestError(null);
 			$this->instanceMapper->update($instance);
@@ -129,7 +178,7 @@ class MigrationController extends Controller {
 	 * instance (v1 only supports one target, so there is no instanceId
 	 * parameter to pick from a list).
 	 *
-	 * @param array<string,string> $userMappings sourceUserId => targetUserId
+	 * @param array<array{sourceUserId: string, targetUserId: string, mode?: string, appPassword?: string}> $userMappings
 	 */
 	public function createRun(string $collisionStrategy, array $userMappings): JSONResponse {
 		$instances = $this->instanceMapper->findAllForOwner($this->currentUserId());
@@ -145,6 +194,8 @@ class MigrationController extends Controller {
 			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings);
 		} catch (\InvalidArgumentException $e) {
 			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_REQUEST);
+		} catch (RemoteConnectionException $e) {
+			return new JSONResponse(['error' => 'Failed to prepare target user account(s): ' . $e->getMessage()], Http::STATUS_BAD_GATEWAY);
 		}
 
 		return new JSONResponse($run, Http::STATUS_CREATED);

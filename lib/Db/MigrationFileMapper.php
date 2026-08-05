@@ -34,11 +34,12 @@ class MigrationFileMapper extends QBMapper {
 	/**
 	 * @throws Exception
 	 */
-	public function findByRunAndPathHash(int $runId, string $pathHash): ?MigrationFile {
+	public function findByRunAndPathHash(int $runId, int $userMapId, string $pathHash): ?MigrationFile {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('*')
 			->from($this->getTableName())
 			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)))
 			->andWhere($qb->expr()->eq('source_path_hash', $qb->createNamedParameter($pathHash)));
 
 		try {

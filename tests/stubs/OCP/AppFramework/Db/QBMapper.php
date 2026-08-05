@@ -16,4 +16,24 @@ namespace OCP\AppFramework\Db;
 abstract class QBMapper {
 	public function __construct($db = null, $tableName = null, $entityClass = null) {
 	}
+
+	public function insert($entity) {
+		return $entity;
+	}
+
+	public function update($entity) {
+		return $entity;
+	}
+
+	public function delete($entity) {
+		return $entity;
+	}
+
+	protected function findEntity($query) {
+		throw new DoesNotExistException('stub');
+	}
+
+	protected function findEntities($query): array {
+		return [];
+	}
 }

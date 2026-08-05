@@ -33,6 +33,7 @@ class MappingService {
 	public function mapFile(
 		MigrationFile $file,
 		RemoteInstance $instance,
+		string $targetUserId,
 		string $appPassword,
 		string $collisionStrategy,
 	): void {
@@ -54,7 +55,7 @@ class MappingService {
 		}
 
 		try {
-			$existing = $this->webDavClient->stat($instance, $appPassword, $file->getSourcePath());
+			$existing = $this->webDavClient->stat($instance, $targetUserId, $appPassword, $file->getSourcePath());
 		} catch (RemoteConnectionException $e) {
 			$file->setState(MigrationFile::STATE_MAPPING_FAILED);
 			$file->setLastError('Collision check failed: ' . $e->getMessage());

@@ -87,16 +87,16 @@ class TransferWorkerJob extends QueuedJob {
 
 		try {
 			$instance = $this->instanceMapper->find($run->getInstanceId());
-			$appPassword = $this->credentialService->decrypt($instance->getAppPasswordEncrypted());
+			$userMap = $this->userMapMapper->find($file->getUserMapId());
+			$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
 
-			$this->mappingService->mapFile($file, $instance, $appPassword, $run->getCollisionStrategy());
+			$this->mappingService->mapFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $run->getCollisionStrategy());
 
 			if ($file->getState() === MigrationFile::STATE_MAPPED) {
-				$userMap = $this->userMapMapper->find($file->getUserMapId());
 				if ($file->getIsDirectory()) {
-					$this->transferService->transferDirectory($file, $instance, $appPassword);
+					$this->transferService->transferDirectory($file, $instance, $userMap->getTargetUserId(), $appPassword);
 				} else {
-					$this->transferService->transferFile($file, $instance, $appPassword, $userMap->getSourceUserId());
+					$this->transferService->transferFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $userMap->getSourceUserId());
 				}
 			} else {
 				// SKIPPED or MAPPING_FAILED: terminal, just release the lock.

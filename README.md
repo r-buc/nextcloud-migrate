@@ -17,6 +17,22 @@ ACLs.
   reads the local file tree directly via the Nextcloud Files API
   (`OCP\Files\IRootFolder`) - fast, no HTTP. Only the TARGET instance is
   reached over the network, via WebDAV.
+- **Credentials (important)**: Nextcloud's WebDAV auth backend rewrites the
+  DAV principal to whichever user actually authenticates - there is no
+  admin-bypass for writing into a different user's files. So the single
+  target instance's admin credential (`RemoteInstance`) is used ONLY for
+  the OCS Provisioning API (listing remote users, and the default "auto"
+  mapping mode's create-or-reset-password flow); every actual file transfer
+  authenticates as that specific mapped user's own app password
+  (`UserMap.targetAppPasswordEncrypted`). Two mapping modes, chosen per
+  user in the admin UI:
+  - **auto** (default): the target account is created (if it doesn't exist
+    yet) or has its password reset (if it does) via the admin credential,
+    so no manual per-user password is needed. Intended for migrations where
+    target accounts are freshly provisioned/initial.
+  - **manual** ("expert mode"): the admin supplies an app password they
+    already obtained from that specific target user, without touching the
+    target account via the admin API at all.
 - **Large-file transfer** uses the NG Chunking v2 protocol - the same wire
   protocol the official Nextcloud desktop/mobile clients use - giving true
   chunk-level resume instead of restarting a whole large file after a crash.
@@ -41,6 +57,10 @@ ACLs.
   (`MappingService`), not as a separate bulk pre-pass, to avoid an extra
   PROPFIND round trip per file. Strategies: `rename` (default), `skip`,
   `overwrite`.
+- **v1 simplification**: one target instance and one current run per admin
+  (no multi-instance/multi-run list UI) - re-saving the instance form
+  updates the same row, and the admin settings page shows only the
+  latest/current run. A run can still cover many mapped users at once.
 
 ## Key classes
 
@@ -51,7 +71,8 @@ ACLs.
 | Collision resolution | `Service\MappingService` |
 | Upload (simple + chunked) | `Service\TransferService` |
 | Checksum verification | `Service\VerificationService` |
-| Target WebDAV calls | `Service\WebDavClient` |
+| Target WebDAV calls (per-user file transfer) | `Service\WebDavClient` |
+| Target OCS Provisioning API (admin-only: list/create/reset users) | `Service\ProvisioningClient` |
 | Credential encryption | `Service\CredentialService` (uses `OCP\Security\ICrypto`) |
 | Audit log | `Service\EventLogger` |
 | Reports (dry-run/final) | `Service\ReportService` |
@@ -83,6 +104,24 @@ docker run --rm -v "$PWD":/app -w /app php:8.3-cli \
 Full runtime testing requires a Nextcloud dev instance (server + this app
 installed under `apps/nextcloud_migrate`) since it depends on Nextcloud's
 `OCP` APIs, DI container, and database migrations.
+
+## End-to-end integration test
+
+`tests/integration/e2e-two-instance.sh` spins up two fresh, throwaway
+Nextcloud containers (source + target) on a private podman network,
+installs this app on the source, and drives a full migration run through
+the REST API + background jobs exactly like the admin UI would - covering
+both the default "auto" mapping mode's create-a-new-target-user and
+reset-an-existing-target-user's-password paths, and verifying the migrated
+files land on the target with a matching SHA-256 checksum.
+
+Requires `podman` on PATH. Safe to re-run any time - it always tears down
+and recreates its containers from scratch (schema/data migration between
+versions is a v2 concern, not handled during v1 development):
+
+```bash
+tests/integration/e2e-two-instance.sh
+```
 
 ## Unit tests
 

@@ -15,6 +15,7 @@ use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\CredentialService;
 use OCA\NextcloudMigrate\Service\EventLogger;
+use OCA\NextcloudMigrate\Service\ProvisioningClient;
 use OCA\NextcloudMigrate\Service\ReportService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCA\NextcloudMigrate\Service\WebDavClient;
@@ -33,6 +34,7 @@ final class RunOrchestratorTest extends TestCase {
 	private UserMapMapper $userMapMapper;
 	private MigrationFileMapper $fileMapper;
 	private WebDavClient $webDavClient;
+	private ProvisioningClient $provisioningClient;
 	private CredentialService $credentialService;
 	private ReportService $reportService;
 	private EventLogger $eventLogger;
@@ -46,6 +48,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->userMapMapper = $this->createMock(UserMapMapper::class);
 		$this->fileMapper = $this->createMock(MigrationFileMapper::class);
 		$this->webDavClient = $this->createMock(WebDavClient::class);
+		$this->provisioningClient = $this->createMock(ProvisioningClient::class);
 		$this->credentialService = $this->createMock(CredentialService::class);
 		$this->reportService = $this->createMock(ReportService::class);
 		$this->eventLogger = $this->createMock(EventLogger::class);
@@ -61,6 +64,7 @@ final class RunOrchestratorTest extends TestCase {
 			$this->userMapMapper,
 			$this->fileMapper,
 			$this->webDavClient,
+			$this->provisioningClient,
 			$this->credentialService,
 			$this->reportService,
 			$this->eventLogger,
