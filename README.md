@@ -83,6 +83,19 @@ ACLs.
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the
   latest/current run. A run can still cover many mapped users at once.
+- **Admin UI**: a "Quick migration" panel (Start/Cancel only) picks users,
+  creates the run, and drives it hands-off - the frontend automatically
+  calls the dry-run endpoint once the run is `CREATED` and the approve
+  endpoint once it reaches `DRY_RUN_READY` (see `maybeAutoAdvance()` in
+  `js/admin.js`), polling `GET .../status` every few seconds for a live
+  progress bar and a per-user files/bytes table. This is purely a frontend
+  convenience - the backend endpoints/state machine are unchanged, so the
+  older "Migration run (manual/advanced)" panel below it (kept during this
+  UI's testing period) can still drive every stage by hand. Per-user
+  transferred/total byte counts are computed live in `StatusController`
+  (`MigrationFileMapper::statsByUser()`), not from `UserMap`'s own
+  `totalFiles`/`transferredFiles` columns, which are only ever set once at
+  discovery time.
 
 ## Key classes
 

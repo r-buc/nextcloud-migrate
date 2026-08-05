@@ -8,6 +8,7 @@ use OCA\NextcloudMigrate\Db\MigrationEventMapper;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
+use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCP\AppFramework\Controller;
@@ -52,11 +53,40 @@ class StatusController extends Controller {
 		// write on every status poll.
 		$this->runOrchestrator->refreshRunCounters($run, $counts);
 
+		// Similarly, UserMap's own totalFiles/transferredFiles/failedFiles
+		// columns are only ever set once (at discovery time) and never
+		// updated afterwards, so they can't drive a live per-user progress
+		// table. Build that view here instead from a live per-user
+		// aggregate query, without touching the persisted UserMap rows.
+		$userFileStats = $this->fileMapper->statsByUser($runId);
+		$userMapsOut = array_map(static function (UserMap $userMap) use ($userFileStats) {
+			$stats = $userFileStats[$userMap->getId()] ?? [
+				'totalFiles' => 0,
+				'totalBytes' => 0,
+				'transferredFiles' => 0,
+				'transferredBytes' => 0,
+				'failedFiles' => 0,
+			];
+
+			return [
+				'id' => $userMap->getId(),
+				'runId' => $userMap->getRunId(),
+				'sourceUserId' => $userMap->getSourceUserId(),
+				'targetUserId' => $userMap->getTargetUserId(),
+				'state' => $userMap->getState(),
+				'totalFiles' => $stats['totalFiles'],
+				'totalBytes' => $stats['totalBytes'],
+				'transferredFiles' => $stats['transferredFiles'],
+				'transferredBytes' => $stats['transferredBytes'],
+				'failedFiles' => $stats['failedFiles'],
+			];
+		}, $userMaps);
+
 		return new JSONResponse([
 			'run' => $run,
 			'stateCounts' => $counts,
 			'progressPercent' => $this->calculateProgressPercent($run->getTotalFiles(), $counts, $run->getSkipVerification()),
-			'userMaps' => $userMaps,
+			'userMaps' => $userMapsOut,
 		]);
 	}
 

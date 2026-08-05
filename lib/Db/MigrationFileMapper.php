@@ -161,6 +161,63 @@ class MigrationFileMapper extends QBMapper {
 	}
 
 	/**
+	 * Live per-user file/byte counts for a run, grouped by user_map_id -
+	 * unlike UserMap's own totalFiles/transferredFiles/failedFiles columns
+	 * (only ever set once at discovery time and never updated afterwards),
+	 * this reflects current state on every call. Mirrors
+	 * RunOrchestrator::refreshRunCounters()'s "transferred-or-later"
+	 * definition of "transferred". Used to populate the admin UI's
+	 * per-user progress table.
+	 *
+	 * @return array<int, array{totalFiles:int, totalBytes:int, transferredFiles:int, transferredBytes:int, failedFiles:int}>
+	 * @throws Exception
+	 */
+	public function statsByUser(int $runId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('user_map_id', 'state')
+			->selectAlias($qb->createFunction('COUNT(*)'), 'cnt')
+			->selectAlias($qb->createFunction('SUM(size)'), 'bytes')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->groupBy('user_map_id', 'state');
+
+		$transferredOrLater = [
+			MigrationFile::STATE_TRANSFERRED,
+			MigrationFile::STATE_VERIFYING,
+			MigrationFile::STATE_VERIFIED,
+			MigrationFile::STATE_VERIFICATION_FAILED,
+		];
+		$failedStates = [
+			MigrationFile::STATE_TRANSFER_FAILED,
+			MigrationFile::STATE_VERIFICATION_FAILED,
+			MigrationFile::STATE_MAPPING_FAILED,
+		];
+
+		$result = $qb->executeQuery();
+		$stats = [];
+		while ($row = $result->fetch()) {
+			$userMapId = (int)$row['user_map_id'];
+			$state = $row['state'];
+			$cnt = (int)$row['cnt'];
+			$bytes = $row['bytes'] !== null ? (int)$row['bytes'] : 0;
+
+			$stats[$userMapId] ??= ['totalFiles' => 0, 'totalBytes' => 0, 'transferredFiles' => 0, 'transferredBytes' => 0, 'failedFiles' => 0];
+			$stats[$userMapId]['totalFiles'] += $cnt;
+			$stats[$userMapId]['totalBytes'] += $bytes;
+			if (in_array($state, $transferredOrLater, true)) {
+				$stats[$userMapId]['transferredFiles'] += $cnt;
+				$stats[$userMapId]['transferredBytes'] += $bytes;
+			}
+			if (in_array($state, $failedStates, true)) {
+				$stats[$userMapId]['failedFiles'] += $cnt;
+			}
+		}
+		$result->closeCursor();
+
+		return $stats;
+	}
+
+	/**
 	 * Sums the size of every non-directory row for a run, regardless of
 	 * state. Used to populate migration_runs.total_bytes once discovery
 	 * completes.

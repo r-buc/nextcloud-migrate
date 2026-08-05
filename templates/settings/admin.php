@@ -42,8 +42,68 @@
 		</form>
 	</section>
 
+	<section id="ncm-quick">
+		<h3>Quick migration</h3>
+
+		<form id="ncm-quick-form">
+			<p>
+				<label for="ncm-quick-collision">Collision strategy</label>
+				<select id="ncm-quick-collision" name="collisionStrategy" required>
+					<option value="rename">Rename on collision (default)</option>
+					<option value="skip">Skip on collision</option>
+					<option value="overwrite">Overwrite on collision</option>
+				</select>
+			</p>
+
+			<table id="ncm-quick-users-table">
+				<thead>
+					<tr>
+						<th></th>
+						<th>Local user</th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			</table>
+
+			<p>
+				<button type="submit">Start</button>
+			</p>
+		</form>
+
+		<div id="ncm-quick-progress" hidden>
+			<p id="ncm-quick-status" class="settings-hint"></p>
+			<p>
+				<progress id="ncm-quick-progressbar" max="100" value="0" style="width: 100%;"></progress>
+				<span id="ncm-quick-percent">0%</span>
+			</p>
+			<p id="ncm-quick-error" class="settings-hint" hidden></p>
+
+			<table id="ncm-quick-user-table">
+				<thead>
+					<tr>
+						<th>Local user</th>
+						<th>Target user</th>
+						<th>Files</th>
+						<th>Transferred</th>
+						<th>Volume</th>
+					</tr>
+				</thead>
+				<tbody></tbody>
+			</table>
+
+			<p>
+				<button type="button" id="ncm-quick-cancel">Cancel</button>
+			</p>
+		</div>
+	</section>
+
 	<section id="ncm-run">
-		<h3>Migration run</h3>
+		<h3>Migration run (manual/advanced)</h3>
+		<p class="settings-hint">
+			Kept for testing while the simplified panel above is validated: lets
+			you drive each stage by hand (expert mode, optional verification
+			skip, raw status JSON) instead of the automatic flow.
+		</p>
 
 		<form id="ncm-create-run-form">
 			<p>
