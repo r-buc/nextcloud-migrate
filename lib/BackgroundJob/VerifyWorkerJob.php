@@ -29,6 +29,10 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
 class VerifyWorkerJob extends QueuedJob {
 	private const LOCK_TTL_SECONDS = 300;
 	private const IDLE_REQUEUE_DELAY_SECONDS = 5;
+	// How long to sleep between internal retries when nothing is
+	// immediately verifiable but something is still marked in-flight (see
+	// the comment where this is used, in run()).
+	private const IDLE_POLL_SECONDS = 3;
 
 	public function __construct(
 		ITimeFactory $time,
@@ -81,9 +85,21 @@ class VerifyWorkerJob extends QueuedJob {
 
 			if ($candidates === []) {
 				if ($this->hasInFlightVerifications($runId)) {
+					// Something is still marked VERIFYING - almost always a
+					// crashed worker's orphaned lock rather than genuine
+					// concurrency (this app runs a single sequential worker by
+					// default), so it will clear once the lock expires or
+					// CleanupLocksJob reclaims it. Poll again shortly *within
+					// this same batch* rather than yielding back to the job
+					// queue - see the matching comment in
+					// TransferWorkerJob::run() for why.
+					if (time() < $deadline) {
+						sleep(self::IDLE_POLL_SECONDS);
+						continue;
+					}
 					// A fresh token per re-enqueue (not the current $workerToken)
 					// is required - see the note above the final re-enqueue below.
-					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], time() + self::IDLE_REQUEUE_DELAY_SECONDS);
 					return;
 				}
 				$this->runOrchestrator->onVerificationPoolIdle($runId);

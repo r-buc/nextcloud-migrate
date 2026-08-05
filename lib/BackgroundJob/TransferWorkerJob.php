@@ -31,6 +31,10 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
 class TransferWorkerJob extends QueuedJob {
 	private const LOCK_TTL_SECONDS = 600;
 	private const IDLE_REQUEUE_DELAY_SECONDS = 5;
+	// How long to sleep between internal retries when nothing is
+	// immediately transferable but something is still marked in-flight
+	// (see the comment where this is used, in run()).
+	private const IDLE_POLL_SECONDS = 3;
 
 	public function __construct(
 		ITimeFactory $time,
@@ -87,9 +91,24 @@ class TransferWorkerJob extends QueuedJob {
 
 			if ($candidates === []) {
 				if ($this->hasInFlightTransfers($runId)) {
+					// Something is still marked TRANSFERRING - almost always a
+					// crashed worker's orphaned lock rather than genuine
+					// concurrency (this app runs a single sequential worker by
+					// default), so it will clear once the lock expires or
+					// CleanupLocksJob reclaims it. Poll again shortly *within
+					// this same batch* rather than yielding back to the job
+					// queue: cron.php does not wait for a delayed re-enqueue to
+					// become due - it exits the moment nothing is due right
+					// now - so bailing out here would strand the run until the
+					// next scheduled cron tick (commonly ~5 minutes) for what
+					// might only be a few seconds' wait.
+					if (time() < $deadline) {
+						sleep(self::IDLE_POLL_SECONDS);
+						continue;
+					}
 					// A fresh token per re-enqueue (not the current $workerToken)
 					// is required - see the note above the final re-enqueue below.
-					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], time() + self::IDLE_REQUEUE_DELAY_SECONDS);
 					return;
 				}
 				$this->runOrchestrator->onTransferPoolIdle($runId);
