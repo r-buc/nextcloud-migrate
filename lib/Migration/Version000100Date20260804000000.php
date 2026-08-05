@@ -33,7 +33,11 @@ class Version000100Date20260804000000 extends SimpleMigrationStep {
 			$table->addColumn('url', Types::STRING, ['notnull' => true, 'length' => 1024]);
 			$table->addColumn('target_user_id', Types::STRING, ['notnull' => true, 'length' => 255]);
 			$table->addColumn('app_password_encrypted', Types::TEXT, ['notnull' => true]);
-			$table->addColumn('allow_self_signed', Types::BOOLEAN, ['notnull' => true, 'default' => false]);
+			// Not notnull+default: Nextcloud's schema validator rejects a
+			// literal boolean default combined with notnull (Oracle
+			// portability guard). The app always calls setAllowSelfSigned()
+			// explicitly before insert, so no DB-level default is needed.
+			$table->addColumn('allow_self_signed', Types::BOOLEAN, ['notnull' => false]);
 			$table->addColumn('last_tested_at', Types::BIGINT, ['notnull' => false]);
 			$table->addColumn('last_test_error', Types::TEXT, ['notnull' => false]);
 			$table->addColumn('created_by', Types::STRING, ['notnull' => true, 'length' => 64]);
@@ -98,7 +102,9 @@ class Version000100Date20260804000000 extends SimpleMigrationStep {
 			$table->addColumn('source_path_hash', Types::STRING, ['notnull' => true, 'length' => 64]);
 			$table->addColumn('target_path', Types::TEXT, ['notnull' => false]);
 			$table->addColumn('source_fileid', Types::BIGINT, ['notnull' => false]);
-			$table->addColumn('is_directory', Types::BOOLEAN, ['notnull' => true, 'default' => false]);
+			// See allow_self_signed comment above re: notnull+default=false.
+			// DiscoveryService always calls setIsDirectory() explicitly.
+			$table->addColumn('is_directory', Types::BOOLEAN, ['notnull' => false]);
 			$table->addColumn('size', Types::BIGINT, ['notnull' => true, 'default' => 0]);
 			$table->addColumn('mtime', Types::BIGINT, ['notnull' => false]);
 			$table->addColumn('mimetype', Types::STRING, ['notnull' => false, 'length' => 255]);
