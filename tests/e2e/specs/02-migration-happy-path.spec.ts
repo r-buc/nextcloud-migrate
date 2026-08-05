@@ -22,6 +22,8 @@ const TARGET_URL = process.env.TARGET_URL ?? 'http://localhost:8082';
 const SOURCE_USER = 'e2e-happy-src';
 const TARGET_USER = 'e2e-happy-tgt';
 const USER_PASS = 'TestPass123!';
+
+async function apiPost(url: string, body: unknown, token: string) {
   const res = await fetch(url, {
     method: 'POST',
     headers: {

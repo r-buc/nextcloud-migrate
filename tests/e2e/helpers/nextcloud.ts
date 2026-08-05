@@ -64,11 +64,11 @@ export function enableApp(container: Container = 'nc-source'): void {
  * Trigger background jobs synchronously (drain the cron queue) so tests
  * don't have to wait for real cron intervals.
  *
- * Runs occ background:job-worker until the queue is empty (up to maxRounds).
+ * Runs `occ background:cron` which processes all due jobs in the queue.
  */
 export function runJobs(container: Container = 'nc-source', maxRounds = 20): void {
   for (let i = 0; i < maxRounds; i++) {
-    occ(container, 'background:job-worker', '--run-all-due-now', '--quiet');
+    occ(container, 'background:cron');
   }
 }
 
