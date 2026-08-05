@@ -18,9 +18,13 @@ use OCP\BackgroundJob\QueuedJob;
 use Psr\Log\LoggerInterface;
 
 /**
- * Processes discovery for one source user at a time (rather than the whole
- * run in a single execution), re-enqueueing itself for the next pending user
- * so no single job invocation has to walk every user's tree in one go. Once
+ * Processes as many pending source users as fit within
+ * RunOrchestrator::getBatchSeconds() per execution (rather than exactly one
+ * user per execution), re-enqueueing itself only once that budget is
+ * exhausted and pending users remain. Discovering only one user per job
+ * invocation would gate overall progress on the cron interval (commonly
+ * ~5 minutes under system cron), making runs with many mapped users appear
+ * "stuck" even though each individual discovery only takes seconds. Once
  * no PENDING user mappings remain, hands off to
  * RunOrchestrator::onDiscoveryComplete().
  */
@@ -43,50 +47,54 @@ class DiscoveryJob extends QueuedJob {
 			return;
 		}
 
-		try {
-			$run = $this->runMapper->find($runId);
-		} catch (DoesNotExistException) {
-			return;
-		} catch (\Throwable $e) {
-			$this->logger->warning('DiscoveryJob could not load run; dropping stale/invalid job', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'exception' => $e,
-			]);
-			return;
-		}
+		$deadline = time() + $this->runOrchestrator->getBatchSeconds();
 
-		if ($run->getState() !== MigrationRun::STATE_DISCOVERING) {
-			// Run was paused/cancelled/failed before this execution started.
-			return;
-		}
+		do {
+			try {
+				$run = $this->runMapper->find($runId);
+			} catch (DoesNotExistException) {
+				return;
+			} catch (\Throwable $e) {
+				$this->logger->warning('DiscoveryJob could not load run; dropping stale/invalid job', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'exception' => $e,
+				]);
+				return;
+			}
 
-		$userMaps = $this->userMapMapper->findByRun($runId);
-		$pending = array_values(array_filter($userMaps, static fn (UserMap $um) => $um->getState() === UserMap::STATE_PENDING));
+			if ($run->getState() !== MigrationRun::STATE_DISCOVERING) {
+				// Run was paused/cancelled/failed before this execution started.
+				return;
+			}
 
-		if ($pending === []) {
-			$this->runOrchestrator->onDiscoveryComplete($runId);
-			return;
-		}
+			$userMaps = $this->userMapMapper->findByRun($runId);
+			$pending = array_values(array_filter($userMaps, static fn (UserMap $um) => $um->getState() === UserMap::STATE_PENDING));
 
-		$userMap = $pending[0];
-		$userMap->setState(UserMap::STATE_ACTIVE);
-		$this->userMapMapper->update($userMap);
+			if ($pending === []) {
+				$this->runOrchestrator->onDiscoveryComplete($runId);
+				return;
+			}
 
-		try {
-			$stats = $this->discoveryService->discoverUser($runId, $userMap, $userMap->getSourceUserId());
-			$userMap->setTotalFiles($stats['files'] + $stats['folders']);
+			$userMap = $pending[0];
+			$userMap->setState(UserMap::STATE_ACTIVE);
 			$this->userMapMapper->update($userMap);
-		} catch (\Throwable $e) {
-			$userMap->setState(UserMap::STATE_FAILED);
-			$this->userMapMapper->update($userMap);
-			$this->logger->error('Discovery failed for source user', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'sourceUserId' => $userMap->getSourceUserId(),
-				'exception' => $e,
-			]);
-		}
+
+			try {
+				$stats = $this->discoveryService->discoverUser($runId, $userMap, $userMap->getSourceUserId());
+				$userMap->setTotalFiles($stats['files'] + $stats['folders']);
+				$this->userMapMapper->update($userMap);
+			} catch (\Throwable $e) {
+				$userMap->setState(UserMap::STATE_FAILED);
+				$this->userMapMapper->update($userMap);
+				$this->logger->error('Discovery failed for source user', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'sourceUserId' => $userMap->getSourceUserId(),
+					'exception' => $e,
+				]);
+			}
+		} while (time() < $deadline);
 
 		$remaining = $this->userMapMapper->findByRun($runId);
 		$stillPending = array_filter($remaining, static fn (UserMap $um) => $um->getState() === UserMap::STATE_PENDING);
@@ -98,7 +106,7 @@ class DiscoveryJob extends QueuedJob {
 			// a new one. cron.php aborts its entire run (not just this job)
 			// the moment it sees the same job row id twice in one pass, so an
 			// unchanging argument here would prematurely kill cron.php after
-			// only one user's worth of discovery.
+			// only one batch's worth of discovery.
 			$this->jobList->add(self::class, ['runId' => $runId, 'nonce' => UuidGenerator::v4()]);
 		} else {
 			$this->runOrchestrator->onDiscoveryComplete($runId);
