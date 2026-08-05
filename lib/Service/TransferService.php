@@ -11,7 +11,7 @@ use OCA\NextcloudMigrate\Exception\TransferException;
 use OCP\Files\IRootFolder;
 use OCP\Files\NotFoundException;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\Uid\Uuid;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
  * Streams a single discovered file/folder from local storage to the target
@@ -171,7 +171,7 @@ class TransferService {
 		$preSize = $node->getSize();
 
 		if ($file->getTransferId() === null) {
-			$file->setTransferId(Uuid::v4()->toRfc4122());
+			$file->setTransferId(UuidGenerator::v4());
 			$file->setNextChunkIndex(0);
 			// Persist immediately so a crash right after this point still
 			// lets a resume reconcile against the same staging collection.

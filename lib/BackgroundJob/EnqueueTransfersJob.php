@@ -10,7 +10,7 @@ use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
-use Symfony\Component\Uid\Uuid;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
  * Transitions an APPROVED run into TRANSFERRING and spins up the initial
@@ -44,7 +44,7 @@ class EnqueueTransfersJob extends QueuedJob {
 
 		$workers = $this->runOrchestrator->getConcurrentWorkers();
 		for ($i = 0; $i < $workers; $i++) {
-			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'workerToken' => Uuid::v4()->toRfc4122()]);
+			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 		}
 	}
 }

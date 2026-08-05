@@ -20,7 +20,7 @@ use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\BackgroundJob\IJobList;
 use OCP\IConfig;
-use Symfony\Component\Uid\Uuid;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
  * Owns the migration_runs state machine and coordinates the transitions
@@ -64,7 +64,7 @@ class RunOrchestrator {
 		$now = time();
 
 		$run = new MigrationRun();
-		$run->setUuid(Uuid::v4()->toRfc4122());
+		$run->setUuid(UuidGenerator::v4());
 		$run->setInstanceId($instanceId);
 		$run->setState(MigrationRun::STATE_CREATED);
 		$run->setCollisionStrategy($collisionStrategy);
@@ -207,7 +207,7 @@ class RunOrchestrator {
 		$this->eventLogger->log($runId, 'transfer_completed', 'All transferable files processed; starting verification');
 
 		for ($i = 0; $i < $this->getConcurrentWorkers(); $i++) {
-			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => Uuid::v4()->toRfc4122()]);
+			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 		}
 	}
 
@@ -291,7 +291,7 @@ class RunOrchestrator {
 			$run->setState(MigrationRun::STATE_VERIFYING);
 			$this->runMapper->update($run);
 			for ($i = 0; $i < $this->getConcurrentWorkers(); $i++) {
-				$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => Uuid::v4()->toRfc4122()]);
+				$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 			}
 		} else {
 			$run->setState(MigrationRun::STATE_FINALIZING);

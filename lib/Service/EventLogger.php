@@ -37,17 +37,18 @@ class EventLogger {
 		$event->setCreatedAt(time());
 		$this->eventMapper->insert($event);
 
-		$logLevel = match ($severity) {
-			MigrationEvent::SEVERITY_DEBUG => 'debug',
-			MigrationEvent::SEVERITY_WARNING => 'warning',
-			MigrationEvent::SEVERITY_ERROR, MigrationEvent::SEVERITY_CRITICAL => 'error',
-			default => 'info',
-		};
-		$this->logger->log($logLevel, "[nextcloud_migrate] {$eventType}: {$message}", [
+		$context = [
 			'app' => 'nextcloud_migrate',
 			'runId' => $runId,
 			'fileId' => $fileId,
 			'context' => $context,
-		]);
+		];
+		$logMessage = "[nextcloud_migrate] {$eventType}: {$message}";
+		match ($severity) {
+			MigrationEvent::SEVERITY_DEBUG => $this->logger->debug($logMessage, $context),
+			MigrationEvent::SEVERITY_WARNING => $this->logger->warning($logMessage, $context),
+			MigrationEvent::SEVERITY_ERROR, MigrationEvent::SEVERITY_CRITICAL => $this->logger->error($logMessage, $context),
+			default => $this->logger->info($logMessage, $context),
+		};
 	}
 }

@@ -60,7 +60,7 @@ use OCP\AppFramework\Db\Entity;
  * @method int getUpdatedAt()
  * @method void setUpdatedAt(int $updatedAt)
  */
-class MigrationFile extends Entity {
+class MigrationFile extends Entity implements \JsonSerializable {
 	// File-level state machine (see architecture notes: DISCOVERED -> MAPPED ->
 	// TRANSFERRING (+retries) -> TRANSFERRED -> VERIFYING (+retries) -> VERIFIED)
 	public const STATE_DISCOVERED = 'discovered';
@@ -129,5 +129,32 @@ class MigrationFile extends Entity {
 		$this->addType('verifiedAt', 'integer');
 		$this->addType('createdAt', 'integer');
 		$this->addType('updatedAt', 'integer');
+	}
+
+	public function jsonSerialize(): array {
+		return [
+			'id' => $this->getId(),
+			'runId' => $this->getRunId(),
+			'userMapId' => $this->getUserMapId(),
+			'sourcePath' => $this->getSourcePath(),
+			'targetPath' => $this->getTargetPath(),
+			'sourceFileid' => $this->getSourceFileid(),
+			'isDirectory' => $this->getIsDirectory(),
+			'size' => $this->getSize(),
+			'mtime' => $this->getMtime(),
+			'mimetype' => $this->getMimetype(),
+			'sourceChecksum' => $this->getSourceChecksum(),
+			'targetChecksum' => $this->getTargetChecksum(),
+			'state' => $this->getState(),
+			'transferAttempts' => $this->getTransferAttempts(),
+			'verifyAttempts' => $this->getVerifyAttempts(),
+			'lastError' => $this->getLastError(),
+			'bytesTransferred' => $this->getBytesTransferred(),
+			'nextRetryAt' => $this->getNextRetryAt(),
+			'transferredAt' => $this->getTransferredAt(),
+			'verifiedAt' => $this->getVerifiedAt(),
+			'createdAt' => $this->getCreatedAt(),
+			'updatedAt' => $this->getUpdatedAt(),
+		];
 	}
 }

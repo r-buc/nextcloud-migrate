@@ -7,7 +7,6 @@ namespace OCA\NextcloudMigrate\Service;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
 use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
 use OCA\NextcloudMigrate\Exception\TransferException;
-use OCP\Http\Client\IClientService;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -17,12 +16,16 @@ use Psr\Log\LoggerInterface;
  * migration is read directly off local storage via the Files API
  * (see DiscoveryService/TransferService). The target instance is only ever
  * reachable over the network, hence this WebDAV wrapper.
+ *
+ * Implemented with plain PHP curl rather than OCP\Http\Client: the WebDAV
+ * verbs this app needs (PROPFIND, MKCOL, MOVE) can only be sent through
+ * OCP\Http\Client\IClient's generic request() method, which was only added
+ * in Nextcloud 29 - this app supports 27+ (see appinfo/info.xml).
  */
 class WebDavClient {
 	private const REQUEST_TIMEOUT = 60;
 
 	public function __construct(
-		private IClientService $clientService,
 		private LoggerInterface $logger,
 	) {
 	}
@@ -62,11 +65,10 @@ class WebDavClient {
 	 * @throws RemoteConnectionException
 	 */
 	public function makeCollection(RemoteInstance $instance, string $appPassword, string $path): void {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUri($instance, $path);
 
 		try {
-			$client->request('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			// 405 = already exists, treat as success for idempotent folder creation.
@@ -94,12 +96,10 @@ class WebDavClient {
 		int $mtime,
 		?string $sha256 = null,
 	): void {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUri($instance, $path);
 
 		$headers = [
 			'X-OC-MTime' => (string)$mtime,
-			'Content-Length' => (string)$size,
 		];
 		if ($sha256 !== null) {
 			$headers['OC-Checksum'] = 'SHA256:' . $sha256;
@@ -108,11 +108,12 @@ class WebDavClient {
 		$options = $this->baseOptions($instance, $appPassword);
 		$options['headers'] = array_merge($options['headers'], $headers);
 		$options['body'] = $stream;
+		$options['bodySize'] = $size;
 		// Large-file transfers must not be capped by the default client timeout.
 		$options['timeout'] = max(self::REQUEST_TIMEOUT, (int)ceil($size / (1024 * 1024)) * 2);
 
 		try {
-			$client->request('PUT', $uri, $options);
+			$this->execute('PUT', $uri, $options);
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
@@ -130,11 +131,10 @@ class WebDavClient {
 	 * @throws RemoteConnectionException
 	 */
 	public function startChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUploadUri($instance, $transferId, '');
 
 		try {
-			$client->request('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
+			$this->execute('MKCOL', $uri, $this->baseOptions($instance, $appPassword));
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			if ($status === 405) {
@@ -159,16 +159,15 @@ class WebDavClient {
 		$chunkStream,
 		int $chunkSize,
 	): void {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUploadUri($instance, $transferId, sprintf('%015d', $chunkIndex));
 
 		$options = $this->baseOptions($instance, $appPassword);
-		$options['headers']['Content-Length'] = (string)$chunkSize;
 		$options['body'] = $chunkStream;
+		$options['bodySize'] = $chunkSize;
 		$options['timeout'] = max(self::REQUEST_TIMEOUT, (int)ceil($chunkSize / (1024 * 1024)) * 2);
 
 		try {
-			$client->request('PUT', $uri, $options);
+			$this->execute('PUT', $uri, $options);
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
@@ -185,7 +184,6 @@ class WebDavClient {
 	 * @throws RemoteConnectionException
 	 */
 	public function listUploadedChunks(RemoteInstance $instance, string $appPassword, string $transferId): array {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUploadUri($instance, $transferId, '');
 
 		$options = $this->baseOptions($instance, $appPassword);
@@ -194,7 +192,7 @@ class WebDavClient {
 		$options['body'] = '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/></d:prop></d:propfind>';
 
 		try {
-			$response = $client->request('PROPFIND', $uri, $options);
+			$response = $this->execute('PROPFIND', $uri, $options);
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			if ($status === 404) {
@@ -206,7 +204,7 @@ class WebDavClient {
 
 		$indexes = [];
 		try {
-			$doc = new \SimpleXMLElement((string)$response->getBody());
+			$doc = new \SimpleXMLElement($response['body']);
 			$doc->registerXPathNamespace('d', 'DAV:');
 			foreach ($doc->xpath('//d:response/d:href') as $href) {
 				$segments = explode('/', rtrim((string)$href, '/'));
@@ -241,7 +239,6 @@ class WebDavClient {
 		int $mtime,
 		?string $sha256 = null,
 	): void {
-		$client = $this->clientService->newClient();
 		$sourceUri = $this->buildUploadUri($instance, $transferId, '.file');
 		$destinationUri = $this->buildUri($instance, $destinationPath);
 
@@ -255,7 +252,7 @@ class WebDavClient {
 		}
 
 		try {
-			$client->request('MOVE', $sourceUri, $options);
+			$this->execute('MOVE', $sourceUri, $options);
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			$retryable = $status === null || $status >= 500 || $status === 429 || $status === 0;
@@ -269,9 +266,8 @@ class WebDavClient {
 	 */
 	public function abortChunkedUpload(RemoteInstance $instance, string $appPassword, string $transferId): void {
 		try {
-			$client = $this->clientService->newClient();
 			$uri = $this->buildUploadUri($instance, $transferId, '');
-			$client->request('DELETE', $uri, $this->baseOptions($instance, $appPassword));
+			$this->execute('DELETE', $uri, $this->baseOptions($instance, $appPassword));
 		} catch (\Exception $e) {
 			$this->logger->debug('Failed to clean up abandoned chunked upload (non-fatal)', ['exception' => $e]);
 		}
@@ -296,16 +292,15 @@ class WebDavClient {
 	 * @throws TransferException
 	 */
 	public function fetchSha256(RemoteInstance $instance, string $appPassword, string $path): string {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUri($instance, $path);
 
 		try {
-			$response = $client->get($uri, $this->baseOptions($instance, $appPassword));
+			$response = $this->execute('GET', $uri, $this->baseOptions($instance, $appPassword));
 		} catch (\Exception $e) {
 			throw new TransferException("Download for verification failed for '{$path}': " . $e->getMessage(), true, $e);
 		}
 
-		return hash('sha256', $response->getBody());
+		return hash('sha256', $response['body']);
 	}
 
 	/**
@@ -313,7 +308,6 @@ class WebDavClient {
 	 * @throws RemoteConnectionException
 	 */
 	private function propfind(RemoteInstance $instance, string $appPassword, string $path, int $depth): array {
-		$client = $this->clientService->newClient();
 		$uri = $this->buildUri($instance, $path);
 
 		$body = <<<XML
@@ -334,13 +328,13 @@ XML;
 		$options['body'] = $body;
 
 		try {
-			$response = $client->request('PROPFIND', $uri, $options);
+			$response = $this->execute('PROPFIND', $uri, $options);
 		} catch (\Exception $e) {
 			$status = $this->statusFromException($e);
 			throw new RemoteConnectionException("PROPFIND failed for '{$path}': " . $e->getMessage(), $status ?? 0, $e);
 		}
 
-		return $this->parsePropfindResponse((string)$response->getBody());
+		return $this->parsePropfindResponse($response['body']);
 	}
 
 	/**
@@ -402,11 +396,82 @@ XML;
 		];
 	}
 
-	private function statusFromException(\Exception $e): ?int {
-		if (method_exists($e, 'getResponse') && $e->getResponse() !== null) {
-			return $e->getResponse()->getStatusCode();
+	/**
+	 * Executes a raw HTTP/WebDAV request via curl. Bypasses OCP\Http\Client
+	 * because its generic multi-verb request() method (needed for PROPFIND,
+	 * MKCOL, MOVE) was only added in Nextcloud 29; this keeps the app
+	 * working on the full declared range (27-31).
+	 *
+	 * @param array{headers?: array<string,string>, auth?: array{0:string,1:string}, verify?: bool, timeout?: int, body?: mixed, bodySize?: int} $options
+	 * @return array{status: int, body: string, headers: array<string,string>}
+	 * @throws \RuntimeException on transport failure or HTTP status >= 400 (code = status, or 0 for transport failures)
+	 */
+	private function execute(string $method, string $uri, array $options): array {
+		$ch = curl_init();
+		curl_setopt($ch, CURLOPT_URL, $uri);
+		curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_TIMEOUT, $options['timeout'] ?? self::REQUEST_TIMEOUT);
+		$verify = $options['verify'] ?? true;
+		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $verify);
+		curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $verify ? 2 : 0);
+		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+
+		if (isset($options['auth'])) {
+			curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+			curl_setopt($ch, CURLOPT_USERPWD, $options['auth'][0] . ':' . $options['auth'][1]);
 		}
 
-		return null;
+		$headerLines = [];
+		foreach ($options['headers'] ?? [] as $name => $value) {
+			$headerLines[] = "{$name}: {$value}";
+		}
+		if ($headerLines !== []) {
+			curl_setopt($ch, CURLOPT_HTTPHEADER, $headerLines);
+		}
+
+		$body = $options['body'] ?? null;
+		if (is_resource($body)) {
+			curl_setopt($ch, CURLOPT_UPLOAD, true);
+			curl_setopt($ch, CURLOPT_INFILE, $body);
+			if (isset($options['bodySize'])) {
+				curl_setopt($ch, CURLOPT_INFILESIZE, $options['bodySize']);
+			}
+		} elseif ($body !== null) {
+			curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+		}
+
+		$responseHeaders = [];
+		curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($curl, $headerLine) use (&$responseHeaders) {
+			$len = strlen($headerLine);
+			$parts = explode(':', $headerLine, 2);
+			if (count($parts) === 2) {
+				$responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+			}
+
+			return $len;
+		});
+
+		$responseBody = curl_exec($ch);
+		if ($responseBody === false) {
+			$error = curl_error($ch);
+			curl_close($ch);
+			throw new \RuntimeException("WebDAV request failed ({$method} {$uri}): {$error}", 0);
+		}
+
+		$status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		curl_close($ch);
+
+		if ($status >= 400) {
+			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri})", $status);
+		}
+
+		return ['status' => $status, 'body' => (string)$responseBody, 'headers' => $responseHeaders];
+	}
+
+	private function statusFromException(\Exception $e): ?int {
+		$code = $e->getCode();
+
+		return $code > 0 ? $code : null;
 	}
 }

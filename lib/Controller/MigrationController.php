@@ -18,7 +18,7 @@ use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IRequest;
 use OCP\IUserSession;
-use Symfony\Component\Uid\Uuid;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
  * Admin-only REST endpoints (no #[NoAdminRequired] attribute is used, so
@@ -55,7 +55,7 @@ class MigrationController extends Controller {
 		}
 
 		$instance = new RemoteInstance();
-		$instance->setUuid(Uuid::v4()->toRfc4122());
+		$instance->setUuid(UuidGenerator::v4());
 		$instance->setLabel($label);
 		$instance->setUrl(rtrim($url, '/'));
 		$instance->setTargetUserId($targetUserId);

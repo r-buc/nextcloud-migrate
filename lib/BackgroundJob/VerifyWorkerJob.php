@@ -17,7 +17,7 @@ use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\Uid\Uuid;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
  * Self-perpetuating verification worker, mirroring TransferWorkerJob: claims
@@ -45,7 +45,7 @@ class VerifyWorkerJob extends QueuedJob {
 
 	protected function run($argument): void {
 		$runId = (int)$argument['runId'];
-		$workerToken = (string)($argument['workerToken'] ?? Uuid::v4()->toRfc4122());
+		$workerToken = (string)($argument['workerToken'] ?? UuidGenerator::v4());
 
 		try {
 			$run = $this->runMapper->find($runId);

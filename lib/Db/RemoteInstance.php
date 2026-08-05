@@ -28,7 +28,7 @@ use OCP\AppFramework\Db\Entity;
  * @method int getCreatedAt()
  * @method void setCreatedAt(int $createdAt)
  */
-class RemoteInstance extends Entity {
+class RemoteInstance extends Entity implements \JsonSerializable {
 	protected $uuid;
 	protected $label;
 	protected $url;

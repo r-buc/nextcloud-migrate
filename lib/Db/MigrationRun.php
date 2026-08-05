@@ -50,7 +50,7 @@ use OCP\AppFramework\Db\Entity;
  * @method int getUpdatedAt()
  * @method void setUpdatedAt(int $updatedAt)
  */
-class MigrationRun extends Entity {
+class MigrationRun extends Entity implements \JsonSerializable {
 	// Run lifecycle states (see RunOrchestrator::TRANSITIONS for the graph)
 	public const STATE_CREATED = 'created';
 	public const STATE_VALIDATING = 'validating';

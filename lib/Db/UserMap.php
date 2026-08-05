@@ -24,7 +24,7 @@ use OCP\AppFramework\Db\Entity;
  * @method int getCreatedAt()
  * @method void setCreatedAt(int $createdAt)
  */
-class UserMap extends Entity {
+class UserMap extends Entity implements \JsonSerializable {
 	public const STATE_PENDING = 'pending';
 	public const STATE_ACTIVE = 'active';
 	public const STATE_COMPLETED = 'completed';
@@ -45,5 +45,19 @@ class UserMap extends Entity {
 		$this->addType('transferredFiles', 'integer');
 		$this->addType('failedFiles', 'integer');
 		$this->addType('createdAt', 'integer');
+	}
+
+	public function jsonSerialize(): array {
+		return [
+			'id' => $this->getId(),
+			'runId' => $this->getRunId(),
+			'sourceUserId' => $this->getSourceUserId(),
+			'targetUserId' => $this->getTargetUserId(),
+			'state' => $this->getState(),
+			'totalFiles' => $this->getTotalFiles(),
+			'transferredFiles' => $this->getTransferredFiles(),
+			'failedFiles' => $this->getFailedFiles(),
+			'createdAt' => $this->getCreatedAt(),
+		];
 	}
 }
