@@ -55,82 +55,93 @@ class TransferWorkerJob extends QueuedJob {
 		}
 		$workerToken = (string)($argument['workerToken'] ?? UuidGenerator::v4());
 
-		try {
-			$run = $this->runMapper->find($runId);
-		} catch (DoesNotExistException) {
-			return;
-		} catch (\Throwable $e) {
-			$this->logger->warning('TransferWorkerJob could not load run; dropping stale/invalid job', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'exception' => $e,
-			]);
-			return;
-		}
+		// Process files in a loop for up to getBatchSeconds() rather than
+		// handling exactly one file per job execution - re-enqueuing after
+		// every single file wastes most of cron.php's per-invocation time
+		// budget on job-queue churn instead of actual transfer work.
+		$deadline = time() + $this->runOrchestrator->getBatchSeconds();
+		$processed = 0;
 
-		if (!in_array($run->getState(), [MigrationRun::STATE_APPROVED, MigrationRun::STATE_TRANSFERRING], true)) {
-			// Paused, cancelled, or already moved past transferring: this
-			// worker lineage stops here (no re-enqueue).
-			return;
-		}
-
-		$now = time();
-		$candidates = $this->fileMapper->findTransferable($runId, $now, 1);
-
-		if ($candidates === []) {
-			if ($this->hasInFlightTransfers($runId)) {
-				// A fresh token per re-enqueue (not the current $workerToken)
-				// is required - see the note above the final re-enqueue below.
-				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+		do {
+			try {
+				$run = $this->runMapper->find($runId);
+			} catch (DoesNotExistException) {
+				return;
+			} catch (\Throwable $e) {
+				$this->logger->warning('TransferWorkerJob could not load run; dropping stale/invalid job', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'exception' => $e,
+				]);
 				return;
 			}
-			$this->runOrchestrator->onTransferPoolIdle($runId);
-			return;
-		}
 
-		$candidate = $candidates[0];
-		if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_TRANSFERRING)) {
-			// Lost the race to another worker for this row; try again now,
-			// with a fresh token (see note above the final re-enqueue below).
-			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
-			return;
-		}
+			if (!in_array($run->getState(), [MigrationRun::STATE_APPROVED, MigrationRun::STATE_TRANSFERRING], true)) {
+				// Paused, cancelled, or already moved past transferring: this
+				// worker lineage stops here (no re-enqueue).
+				return;
+			}
 
-		$file = $this->fileMapper->find($candidate->getId());
+			$now = time();
+			$candidates = $this->fileMapper->findTransferable($runId, $now, 1);
 
-		try {
-			$instance = $this->instanceMapper->find($run->getInstanceId());
-			$userMap = $this->userMapMapper->find($file->getUserMapId());
-			$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
-
-			$this->mappingService->mapFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $run->getCollisionStrategy());
-
-			if ($file->getState() === MigrationFile::STATE_MAPPED) {
-				if ($file->getIsDirectory()) {
-					$this->transferService->transferDirectory($file, $instance, $userMap->getTargetUserId(), $appPassword);
-				} else {
-					$this->transferService->transferFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $userMap->getSourceUserId());
+			if ($candidates === []) {
+				if ($this->hasInFlightTransfers($runId)) {
+					// A fresh token per re-enqueue (not the current $workerToken)
+					// is required - see the note above the final re-enqueue below.
+					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+					return;
 				}
-			} else {
-				// SKIPPED or MAPPING_FAILED: terminal, just release the lock.
+				$this->runOrchestrator->onTransferPoolIdle($runId);
+				return;
+			}
+
+			$candidate = $candidates[0];
+			if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_TRANSFERRING)) {
+				// Lost the race to another worker for this row; just try
+				// the next candidate within this same batch immediately.
+				continue;
+			}
+
+			$file = $this->fileMapper->find($candidate->getId());
+
+			try {
+				$instance = $this->instanceMapper->find($run->getInstanceId());
+				$userMap = $this->userMapMapper->find($file->getUserMapId());
+				$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
+
+				$this->mappingService->mapFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $run->getCollisionStrategy());
+
+				if ($file->getState() === MigrationFile::STATE_MAPPED) {
+					if ($file->getIsDirectory()) {
+						$this->transferService->transferDirectory($file, $instance, $userMap->getTargetUserId(), $appPassword);
+					} else {
+						$this->transferService->transferFile($file, $instance, $userMap->getTargetUserId(), $appPassword, $userMap->getSourceUserId());
+					}
+				} else {
+					// SKIPPED or MAPPING_FAILED: terminal, just release the lock.
+					$file->setLockOwner(null);
+					$file->setLockExpiresAt(null);
+					$file->setUpdatedAt(time());
+					$this->fileMapper->update($file);
+				}
+			} catch (\Throwable $e) {
+				$this->logger->error('Transfer worker failed unexpectedly', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'fileId' => $file->getId(),
+					'exception' => $e,
+				]);
 				$file->setLockOwner(null);
 				$file->setLockExpiresAt(null);
 				$file->setUpdatedAt(time());
 				$this->fileMapper->update($file);
 			}
-		} catch (\Throwable $e) {
-			$this->logger->error('Transfer worker failed unexpectedly', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'fileId' => $file->getId(),
-				'exception' => $e,
-			]);
-			$file->setLockOwner(null);
-			$file->setLockExpiresAt(null);
-			$file->setUpdatedAt(time());
-			$this->fileMapper->update($file);
-		}
 
+			$processed++;
+		} while (time() < $deadline);
+
+		// Batch time budget exhausted with more work potentially remaining.
 		// A fresh token per re-enqueue (rather than reusing $workerToken) is
 		// required: IJobList::add() dedupes by class+argument, so a stable
 		// argument would just update the *same* jobs-table row in place
@@ -140,6 +151,9 @@ class TransferWorkerJob extends QueuedJob {
 		// the same row per lineage would cap throughput at exactly
 		// concurrent_workers files per cron invocation, however much of the
 		// 14-minute budget remained.
+		$this->logger->debug("TransferWorkerJob batch processed {$processed} file(s) for run {$runId} before yielding", [
+			'app' => 'nextcloud_migrate',
+		]);
 		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 	}
 

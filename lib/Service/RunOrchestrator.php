@@ -37,6 +37,13 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
  */
 class RunOrchestrator {
 	private const DEFAULT_CONCURRENT_WORKERS = 5;
+	// How long a single TransferWorkerJob/VerifyWorkerJob execution keeps
+	// claiming and processing files in a loop before re-enqueueing itself,
+	// rather than handling exactly one file per execution. Bounded well
+	// under cron.php's 14-minute per-invocation budget, and kept modest
+	// enough to also be safe under ajax/webcron mode's per-request PHP
+	// execution time limits.
+	private const DEFAULT_BATCH_SECONDS = 20;
 
 	public function __construct(
 		private MigrationRunMapper $runMapper,
@@ -252,6 +259,19 @@ class RunOrchestrator {
 
 	public function getConcurrentWorkers(): int {
 		return (int)$this->config->getAppValue('nextcloud_migrate', 'concurrent_workers', (string)self::DEFAULT_CONCURRENT_WORKERS);
+	}
+
+	/**
+	 * How many seconds a single TransferWorkerJob/VerifyWorkerJob execution
+	 * should keep claiming and processing files before yielding back (by
+	 * re-enqueueing itself with a fresh token) instead of doing exactly one
+	 * file per execution. Configurable via `occ config:app:set
+	 * nextcloud_migrate batch_seconds --value=N` for deployments that only
+	 * use system cron (where longer batches reduce per-file job-queue
+	 * overhead further).
+	 */
+	public function getBatchSeconds(): int {
+		return (int)$this->config->getAppValue('nextcloud_migrate', 'batch_seconds', (string)self::DEFAULT_BATCH_SECONDS);
 	}
 
 	/**

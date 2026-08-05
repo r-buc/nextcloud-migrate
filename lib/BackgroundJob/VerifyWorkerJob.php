@@ -52,69 +52,82 @@ class VerifyWorkerJob extends QueuedJob {
 		}
 		$workerToken = (string)($argument['workerToken'] ?? UuidGenerator::v4());
 
-		try {
-			$run = $this->runMapper->find($runId);
-		} catch (DoesNotExistException) {
-			return;
-		} catch (\Throwable $e) {
-			$this->logger->warning('VerifyWorkerJob could not load run; dropping stale/invalid job', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'exception' => $e,
-			]);
-			return;
-		}
+		// Process files in a loop for up to getBatchSeconds() rather than
+		// handling exactly one file per job execution - see the matching
+		// comment in TransferWorkerJob::run() for why.
+		$deadline = time() + $this->runOrchestrator->getBatchSeconds();
+		$processed = 0;
 
-		if ($run->getState() !== MigrationRun::STATE_VERIFYING) {
-			return;
-		}
-
-		$now = time();
-		$candidates = $this->fileMapper->findVerifiable($runId, $now, 1);
-
-		if ($candidates === []) {
-			if ($this->hasInFlightVerifications($runId)) {
-				// A fresh token per re-enqueue (not the current $workerToken)
-				// is required - see the note above the final re-enqueue below.
-				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+		do {
+			try {
+				$run = $this->runMapper->find($runId);
+			} catch (DoesNotExistException) {
+				return;
+			} catch (\Throwable $e) {
+				$this->logger->warning('VerifyWorkerJob could not load run; dropping stale/invalid job', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'exception' => $e,
+				]);
 				return;
 			}
-			$this->runOrchestrator->onVerificationPoolIdle($runId);
-			return;
-		}
 
-		$candidate = $candidates[0];
-		if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_VERIFYING)) {
-			// Lost the race to another worker for this row; try again now,
-			// with a fresh token (see note above the final re-enqueue below).
-			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
-			return;
-		}
+			if ($run->getState() !== MigrationRun::STATE_VERIFYING) {
+				return;
+			}
 
-		$file = $this->fileMapper->find($candidate->getId());
+			$now = time();
+			$candidates = $this->fileMapper->findVerifiable($runId, $now, 1);
 
-		try {
-			$instance = $this->instanceMapper->find($run->getInstanceId());
-			$userMap = $this->userMapMapper->find($file->getUserMapId());
-			$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
-			$this->verificationService->verifyFile($file, $instance, $userMap->getTargetUserId(), $appPassword);
-		} catch (\Throwable $e) {
-			$this->logger->error('Verify worker failed unexpectedly', [
-				'app' => 'nextcloud_migrate',
-				'runId' => $runId,
-				'fileId' => $file->getId(),
-				'exception' => $e,
-			]);
-			$file->setLockOwner(null);
-			$file->setLockExpiresAt(null);
-			$file->setUpdatedAt(time());
-			$this->fileMapper->update($file);
-		}
+			if ($candidates === []) {
+				if ($this->hasInFlightVerifications($runId)) {
+					// A fresh token per re-enqueue (not the current $workerToken)
+					// is required - see the note above the final re-enqueue below.
+					$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+					return;
+				}
+				$this->runOrchestrator->onVerificationPoolIdle($runId);
+				return;
+			}
 
+			$candidate = $candidates[0];
+			if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_VERIFYING)) {
+				// Lost the race to another worker for this row; just try
+				// the next candidate within this same batch immediately.
+				continue;
+			}
+
+			$file = $this->fileMapper->find($candidate->getId());
+
+			try {
+				$instance = $this->instanceMapper->find($run->getInstanceId());
+				$userMap = $this->userMapMapper->find($file->getUserMapId());
+				$appPassword = $this->credentialService->decrypt($userMap->getTargetAppPasswordEncrypted());
+				$this->verificationService->verifyFile($file, $instance, $userMap->getTargetUserId(), $appPassword);
+			} catch (\Throwable $e) {
+				$this->logger->error('Verify worker failed unexpectedly', [
+					'app' => 'nextcloud_migrate',
+					'runId' => $runId,
+					'fileId' => $file->getId(),
+					'exception' => $e,
+				]);
+				$file->setLockOwner(null);
+				$file->setLockExpiresAt(null);
+				$file->setUpdatedAt(time());
+				$this->fileMapper->update($file);
+			}
+
+			$processed++;
+		} while (time() < $deadline);
+
+		// Batch time budget exhausted with more work potentially remaining.
 		// A fresh token per re-enqueue (rather than reusing $workerToken) is
 		// required - see the detailed comment in TransferWorkerJob's final
 		// re-enqueue for why a stable argument here would silently cap
 		// throughput and can abort cron.php's whole run early.
+		$this->logger->debug("VerifyWorkerJob batch processed {$processed} file(s) for run {$runId} before yielding", [
+			'app' => 'nextcloud_migrate',
+		]);
 		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 	}
 
