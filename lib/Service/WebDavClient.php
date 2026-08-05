@@ -33,9 +33,33 @@ use Psr\Log\LoggerInterface;
 class WebDavClient {
 	private const REQUEST_TIMEOUT = 60;
 
+	// Reused across requests (see execute()) so repeated calls to the same
+	// target instance within a single job execution - e.g. TransferWorkerJob
+	// processing many files in one batch - keep their TCP/TLS connection
+	// alive instead of renegotiating a fresh handshake per request. Scoped
+	// to a single target user at a time (see $curlHandleUserKey): reusing a
+	// connection across different users' credentials is avoided in case
+	// the server-side WebDAV/DAV stack ever mishandles per-connection state
+	// tied to whichever principal last authenticated on it.
+	/** @var \CurlHandle|resource|null */
+	private $curlHandle = null;
+
+	// The target user (or null for unauthenticated requests, e.g.
+	// testConnection()'s status.php check) the current $curlHandle's
+	// connection is scoped to. execute() closes and reopens the handle
+	// whenever this changes.
+	private ?string $curlHandleUserKey = null;
+
 	public function __construct(
 		private LoggerInterface $logger,
 	) {
+	}
+
+	public function __destruct() {
+		if ($this->curlHandle !== null) {
+			curl_close($this->curlHandle);
+			$this->curlHandle = null;
+		}
 	}
 
 	/**
@@ -444,11 +468,32 @@ XML;
 	 * @throws \RuntimeException on transport failure or HTTP status >= 400 (code = status, or 0 for transport failures)
 	 */
 	private function execute(string $method, string $uri, array $options): array {
-		$ch = curl_init();
+		// Reuse the handle across calls (curl_reset() clears previously set
+		// options but preserves the handle's connection cache) so repeated
+		// requests to the same target user within one job execution get
+		// HTTP keep-alive instead of a fresh TCP+TLS handshake every time -
+		// but never share that connection across a *different* user's
+		// credentials (close and reopen instead), so a change of target
+		// user always starts on a brand-new connection.
+		$userKey = $options['auth'][0] ?? null;
+		if ($this->curlHandle !== null && $this->curlHandleUserKey !== $userKey) {
+			curl_close($this->curlHandle);
+			$this->curlHandle = null;
+		}
+
+		if ($this->curlHandle === null) {
+			$this->curlHandle = curl_init();
+		} else {
+			curl_reset($this->curlHandle);
+		}
+		$this->curlHandleUserKey = $userKey;
+		$ch = $this->curlHandle;
+
 		curl_setopt($ch, CURLOPT_URL, $uri);
 		curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
 		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($ch, CURLOPT_TIMEOUT, $options['timeout'] ?? self::REQUEST_TIMEOUT);
+		curl_setopt($ch, CURLOPT_TCP_KEEPALIVE, 1);
 		$verify = $options['verify'] ?? true;
 		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $verify);
 		curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $verify ? 2 : 0);
@@ -492,12 +537,10 @@ XML;
 		$responseBody = curl_exec($ch);
 		if ($responseBody === false) {
 			$error = curl_error($ch);
-			curl_close($ch);
 			throw new \RuntimeException("WebDAV request failed ({$method} {$uri}): {$error}", 0);
 		}
 
 		$status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-		curl_close($ch);
 
 		if ($status >= 400) {
 			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri})", $status);

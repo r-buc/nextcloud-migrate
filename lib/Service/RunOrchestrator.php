@@ -432,10 +432,27 @@ class RunOrchestrator {
 	}
 
 	/**
+	 * Recomputes transferredFiles/verifiedFiles/failedFiles on $run from a
+	 * fresh per-state file count, mutating the entity in place. Callers
+	 * that want this persisted must call runMapper->update($run)
+	 * themselves afterwards (onTransferPoolIdle()/finalizeRun() do; this
+	 * method is also called by StatusController to refresh an in-memory
+	 * $run for a status response without writing to the DB on every poll).
+	 *
 	 * @param array<string,int> $counts
 	 */
-	private function refreshRunCounters(MigrationRun $run, array $counts): void {
-		$run->setTransferredFiles(($counts[MigrationFile::STATE_TRANSFERRED] ?? 0) + ($counts[MigrationFile::STATE_VERIFIED] ?? 0));
+	public function refreshRunCounters(MigrationRun $run, array $counts): void {
+		// "Transferred" means the file has left the pre-transfer pool
+		// successfully - i.e. it's at TRANSFERRED or any later stage in the
+		// pipeline (verifying/verified/verification_failed all necessarily
+		// passed through TRANSFERRED first), not just files currently
+		// sitting in the TRANSFERRED state.
+		$run->setTransferredFiles(
+			($counts[MigrationFile::STATE_TRANSFERRED] ?? 0)
+			+ ($counts[MigrationFile::STATE_VERIFYING] ?? 0)
+			+ ($counts[MigrationFile::STATE_VERIFIED] ?? 0)
+			+ ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
+		);
 		$run->setVerifiedFiles($counts[MigrationFile::STATE_VERIFIED] ?? 0);
 		$run->setFailedFiles(
 			($counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0)

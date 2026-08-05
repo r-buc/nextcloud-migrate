@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\NextcloudMigrate\Controller;
 
 use OCA\NextcloudMigrate\Db\MigrationEventMapper;
+use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
@@ -42,16 +43,58 @@ class StatusController extends Controller {
 		$counts = $this->fileMapper->countByState($runId);
 		$userMaps = $this->userMapMapper->findByRun($runId);
 
-		$totalTerminal = ($run->getTotalFiles() > 0)
-			? round((($counts['verified'] ?? 0) + ($counts['skipped'] ?? 0)) / $run->getTotalFiles() * 100, 1)
-			: 0.0;
+		// run.transferredFiles/verifiedFiles/failedFiles are only persisted at
+		// phase-transition boundaries (RunOrchestrator::onTransferPoolIdle()/
+		// finalizeRun()), not continuously as workers process files, so they
+		// go stale mid-phase (e.g. still showing 2 verified while stateCounts
+		// already shows 150). Refresh them in-memory from the live per-file
+		// counts for this response only - not persisted, to avoid an extra
+		// write on every status poll.
+		$this->runOrchestrator->refreshRunCounters($run, $counts);
 
 		return new JSONResponse([
 			'run' => $run,
 			'stateCounts' => $counts,
-			'progressPercent' => $totalTerminal,
+			'progressPercent' => $this->calculateProgressPercent($run->getTotalFiles(), $counts),
 			'userMaps' => $userMaps,
 		]);
+	}
+
+	/**
+	 * Weights each file's contribution by how far it has progressed through
+	 * the two-phase (transfer, then verify) pipeline, so the reported
+	 * percentage reflects real progress throughout the whole run instead of
+	 * staying at 0% for the entire (often much longer) transfer phase and
+	 * only starting to move once verification begins.
+	 *
+	 * @param array<string,int> $counts
+	 */
+	private function calculateProgressPercent(int $totalFiles, array $counts): float {
+		if ($totalFiles <= 0) {
+			return 0.0;
+		}
+
+		static $weights = [
+			MigrationFile::STATE_DISCOVERED => 0.0,
+			MigrationFile::STATE_MAPPED => 0.0,
+			MigrationFile::STATE_TRANSFERRING => 0.25,
+			MigrationFile::STATE_TRANSFER_FAILED => 0.25,
+			// Terminal - will never be transferred, so counts as settled.
+			MigrationFile::STATE_MAPPING_FAILED => 1.0,
+			MigrationFile::STATE_TRANSFERRED => 0.5,
+			MigrationFile::STATE_VERIFYING => 0.75,
+			MigrationFile::STATE_VERIFICATION_FAILED => 0.75,
+			MigrationFile::STATE_VERIFIED => 1.0,
+			MigrationFile::STATE_SKIPPED => 1.0,
+			MigrationFile::STATE_COMPLETED => 1.0,
+		];
+
+		$weighted = 0.0;
+		foreach ($counts as $state => $count) {
+			$weighted += ($weights[$state] ?? 0.0) * $count;
+		}
+
+		return round($weighted / $totalFiles * 100, 1);
 	}
 
 	public function runFiles(int $runId, ?string $state = null, int $limit = 100, int $offset = 0): JSONResponse {
