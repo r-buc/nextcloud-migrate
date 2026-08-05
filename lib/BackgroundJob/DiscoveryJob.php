@@ -37,11 +37,21 @@ class DiscoveryJob extends QueuedJob {
 	}
 
 	protected function run($argument): void {
-		$runId = (int)$argument['runId'];
+		$runId = $this->extractRunId($argument);
+		if ($runId === null) {
+			return;
+		}
 
 		try {
 			$run = $this->runMapper->find($runId);
 		} catch (DoesNotExistException) {
+			return;
+		} catch (\Throwable $e) {
+			$this->logger->warning('DiscoveryJob could not load run; dropping stale/invalid job', [
+				'app' => 'nextcloud_migrate',
+				'runId' => $runId,
+				'exception' => $e,
+			]);
 			return;
 		}
 
@@ -85,5 +95,16 @@ class DiscoveryJob extends QueuedJob {
 		} else {
 			$this->runOrchestrator->onDiscoveryComplete($runId);
 		}
+	}
+
+	private function extractRunId($argument): ?int {
+		if (!is_array($argument) || !isset($argument['runId']) || !is_numeric($argument['runId'])) {
+			$this->logger->warning('DiscoveryJob invoked with missing/invalid runId argument; skipping', [
+				'app' => 'nextcloud_migrate',
+			]);
+			return null;
+		}
+
+		return (int)$argument['runId'];
 	}
 }

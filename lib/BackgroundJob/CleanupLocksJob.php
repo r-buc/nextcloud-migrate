@@ -32,7 +32,17 @@ class CleanupLocksJob extends TimedJob {
 	}
 
 	protected function run($argument): void {
-		$reclaimed = $this->fileMapper->reclaimStaleLocks(time());
+		try {
+			$reclaimed = $this->fileMapper->reclaimStaleLocks(time());
+		} catch (\Throwable $e) {
+			// e.g. the app's tables don't exist (yet, or anymore, e.g. right
+			// after a manual DB reset) - skip quietly rather than spamming
+			// the log with a raw DB exception every 5 minutes.
+			$this->logger->debug('CleanupLocksJob could not reclaim stale locks: ' . $e->getMessage(), [
+				'app' => 'nextcloud_migrate',
+			]);
+			return;
+		}
 
 		if ($reclaimed > 0) {
 			$this->logger->info("Reclaimed {$reclaimed} stale migration file lock(s) from crashed worker(s)", [

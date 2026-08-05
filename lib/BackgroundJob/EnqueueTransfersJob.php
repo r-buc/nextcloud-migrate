@@ -11,6 +11,7 @@ use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
+use Psr\Log\LoggerInterface;
 
 /**
  * Transitions an APPROVED run into TRANSFERRING and spins up the initial
@@ -23,16 +24,27 @@ class EnqueueTransfersJob extends QueuedJob {
 		ITimeFactory $time,
 		private RunOrchestrator $runOrchestrator,
 		private IJobList $jobList,
+		private LoggerInterface $logger,
 	) {
 		parent::__construct($time);
 	}
 
 	protected function run($argument): void {
-		$runId = (int)$argument['runId'];
+		$runId = $this->extractRunId($argument);
+		if ($runId === null) {
+			return;
+		}
 
 		try {
 			$run = $this->runOrchestrator->getRun($runId);
 		} catch (DoesNotExistException) {
+			return;
+		} catch (\Throwable $e) {
+			$this->logger->warning('EnqueueTransfersJob could not load run; dropping stale/invalid job', [
+				'app' => 'nextcloud_migrate',
+				'runId' => $runId,
+				'exception' => $e,
+			]);
 			return;
 		}
 
@@ -46,5 +58,16 @@ class EnqueueTransfersJob extends QueuedJob {
 		for ($i = 0; $i < $workers; $i++) {
 			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 		}
+	}
+
+	private function extractRunId($argument): ?int {
+		if (!is_array($argument) || !isset($argument['runId']) || !is_numeric($argument['runId'])) {
+			$this->logger->warning('EnqueueTransfersJob invoked with missing/invalid runId argument; skipping', [
+				'app' => 'nextcloud_migrate',
+			]);
+			return null;
+		}
+
+		return (int)$argument['runId'];
 	}
 }

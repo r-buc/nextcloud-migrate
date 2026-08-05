@@ -46,12 +46,22 @@ class VerifyWorkerJob extends QueuedJob {
 	}
 
 	protected function run($argument): void {
-		$runId = (int)$argument['runId'];
+		$runId = $this->extractRunId($argument);
+		if ($runId === null) {
+			return;
+		}
 		$workerToken = (string)($argument['workerToken'] ?? UuidGenerator::v4());
 
 		try {
 			$run = $this->runMapper->find($runId);
 		} catch (DoesNotExistException) {
+			return;
+		} catch (\Throwable $e) {
+			$this->logger->warning('VerifyWorkerJob could not load run; dropping stale/invalid job', [
+				'app' => 'nextcloud_migrate',
+				'runId' => $runId,
+				'exception' => $e,
+			]);
 			return;
 		}
 
@@ -104,5 +114,16 @@ class VerifyWorkerJob extends QueuedJob {
 		$counts = $this->fileMapper->countByState($runId);
 
 		return ($counts[MigrationFile::STATE_VERIFYING] ?? 0) > 0;
+	}
+
+	private function extractRunId($argument): ?int {
+		if (!is_array($argument) || !isset($argument['runId']) || !is_numeric($argument['runId'])) {
+			$this->logger->warning('VerifyWorkerJob invoked with missing/invalid runId argument; skipping', [
+				'app' => 'nextcloud_migrate',
+			]);
+			return null;
+		}
+
+		return (int)$argument['runId'];
 	}
 }
