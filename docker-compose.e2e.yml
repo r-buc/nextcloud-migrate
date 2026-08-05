@@ -16,8 +16,9 @@ services:
     ports:
       - "8081:80"
     volumes:
-      # Mount the app into custom_apps so occ can enable it.
-      - ./:/var/www/html/custom_apps/nextcloud_migrate:ro
+      # Mount the app source read-only and provide a writable custom_apps volume.
+      - ./:/workspace/nextcloud_migrate:ro
+      - nc_source_custom_apps:/var/www/html/custom_apps
       - nc_source_data:/var/www/html/data
     networks:
       - e2e
@@ -34,6 +35,7 @@ services:
 
 volumes:
   nc_source_data:
+  nc_source_custom_apps:
   nc_target_data:
 
 networks:
