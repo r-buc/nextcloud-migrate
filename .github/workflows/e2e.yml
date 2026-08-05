@@ -95,7 +95,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: tests/e2e/package.json
+          cache-dependency-path: tests/e2e/package-lock.json
 
       # -----------------------------------------------------------------------
       # 7. Install Playwright and dependencies

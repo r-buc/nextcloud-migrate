@@ -139,7 +139,8 @@ test.describe('File changed during migration run', () => {
     expect(events.length).toBeGreaterThan(0);
     // If a transfer_failed event exists for the volatile file it is the correct behaviour.
     // If the file happened to be transferred before the mutation, the run completes cleanly.
-    // Either outcome is acceptable – we just assert the run did not crash outright (see above).
-    expect(relevant.length).toBeGreaterThanOrEqual(0); // non-crashing assertion
+    // Either outcome is acceptable – we just assert the run did not crash outright (see above),
+    // and that the event log is non-empty so we know events are being recorded.
+    expect(events.length).toBeGreaterThan(0);
   });
 });

@@ -18,13 +18,10 @@ import { uploadFiles, buildFileTree, fileExists } from '../helpers/webdav';
 
 const SOURCE_URL = process.env.SOURCE_URL ?? 'http://localhost:8081';
 const TARGET_URL = process.env.TARGET_URL ?? 'http://localhost:8082';
-const ADMIN_PASS = 'adminpass';
 
 const SOURCE_USER = 'e2e-happy-src';
 const TARGET_USER = 'e2e-happy-tgt';
 const USER_PASS = 'TestPass123!';
-
-async function apiPost(url: string, body: unknown, token: string) {
   const res = await fetch(url, {
     method: 'POST',
     headers: {

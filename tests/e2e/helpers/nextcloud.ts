@@ -27,13 +27,16 @@ export function occ(container: Container, ...args: string[]): string {
  */
 export function createUser(container: Container, userId: string, password: string): void {
   try {
-    occ(container, 'user:add', '--password-from-env', '--display-name', userId, userId);
+    execSync(
+      `docker exec --user www-data -e OC_PASS=${password} ${container} php occ --no-ansi --no-interaction user:add --password-from-env --display-name ${userId} ${userId}`,
+      { encoding: 'utf8' },
+    );
   } catch {
     // user already exists – ignore
   }
   // Always set/reset the password so tests are deterministic
   execSync(
-    `docker exec --user www-data -e OC_PASS=${password} ${container} php occ user:resetpassword --password-from-env ${userId}`,
+    `docker exec --user www-data -e OC_PASS=${password} ${container} php occ --no-ansi --no-interaction user:resetpassword --password-from-env ${userId}`,
     { encoding: 'utf8' },
   );
 }
