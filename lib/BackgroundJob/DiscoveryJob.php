@@ -10,6 +10,7 @@ use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\DiscoveryService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
+use OCA\NextcloudMigrate\Util\UuidGenerator;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
@@ -91,7 +92,14 @@ class DiscoveryJob extends QueuedJob {
 		$stillPending = array_filter($remaining, static fn (UserMap $um) => $um->getState() === UserMap::STATE_PENDING);
 
 		if ($stillPending !== []) {
-			$this->jobList->add(self::class, ['runId' => $runId]);
+			// A fresh nonce on every re-enqueue is required: IJobList::add()
+			// dedupes by class+argument, so a stable argument would just
+			// update the *same* jobs-table row in place instead of inserting
+			// a new one. cron.php aborts its entire run (not just this job)
+			// the moment it sees the same job row id twice in one pass, so an
+			// unchanging argument here would prematurely kill cron.php after
+			// only one user's worth of discovery.
+			$this->jobList->add(self::class, ['runId' => $runId, 'nonce' => UuidGenerator::v4()]);
 		} else {
 			$this->runOrchestrator->onDiscoveryComplete($runId);
 		}

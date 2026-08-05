@@ -74,7 +74,9 @@ class VerifyWorkerJob extends QueuedJob {
 
 		if ($candidates === []) {
 			if ($this->hasInFlightVerifications($runId)) {
-				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+				// A fresh token per re-enqueue (not the current $workerToken)
+				// is required - see the note above the final re-enqueue below.
+				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
 				return;
 			}
 			$this->runOrchestrator->onVerificationPoolIdle($runId);
@@ -83,7 +85,9 @@ class VerifyWorkerJob extends QueuedJob {
 
 		$candidate = $candidates[0];
 		if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_VERIFYING)) {
-			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken]);
+			// Lost the race to another worker for this row; try again now,
+			// with a fresh token (see note above the final re-enqueue below).
+			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 			return;
 		}
 
@@ -107,7 +111,11 @@ class VerifyWorkerJob extends QueuedJob {
 			$this->fileMapper->update($file);
 		}
 
-		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken]);
+		// A fresh token per re-enqueue (rather than reusing $workerToken) is
+		// required - see the detailed comment in TransferWorkerJob's final
+		// re-enqueue for why a stable argument here would silently cap
+		// throughput and can abort cron.php's whole run early.
+		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 	}
 
 	private function hasInFlightVerifications(int $runId): bool {

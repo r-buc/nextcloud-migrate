@@ -79,7 +79,9 @@ class TransferWorkerJob extends QueuedJob {
 
 		if ($candidates === []) {
 			if ($this->hasInFlightTransfers($runId)) {
-				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
+				// A fresh token per re-enqueue (not the current $workerToken)
+				// is required - see the note above the final re-enqueue below.
+				$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()], $now + self::IDLE_REQUEUE_DELAY_SECONDS);
 				return;
 			}
 			$this->runOrchestrator->onTransferPoolIdle($runId);
@@ -88,8 +90,9 @@ class TransferWorkerJob extends QueuedJob {
 
 		$candidate = $candidates[0];
 		if (!$this->fileMapper->tryAcquireLock($candidate->getId(), $workerToken, self::LOCK_TTL_SECONDS, MigrationFile::STATE_TRANSFERRING)) {
-			// Lost the race to another worker for this row; try again now.
-			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken]);
+			// Lost the race to another worker for this row; try again now,
+			// with a fresh token (see note above the final re-enqueue below).
+			$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 			return;
 		}
 
@@ -128,7 +131,16 @@ class TransferWorkerJob extends QueuedJob {
 			$this->fileMapper->update($file);
 		}
 
-		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => $workerToken]);
+		// A fresh token per re-enqueue (rather than reusing $workerToken) is
+		// required: IJobList::add() dedupes by class+argument, so a stable
+		// argument would just update the *same* jobs-table row in place
+		// instead of inserting a new one. cron.php aborts its entire run
+		// (not just this job) the moment getNext() returns a row id it
+		// already executed this pass, so a fixed-size worker pool reusing
+		// the same row per lineage would cap throughput at exactly
+		// concurrent_workers files per cron invocation, however much of the
+		// 14-minute budget remained.
+		$this->jobList->add(self::class, ['runId' => $runId, 'workerToken' => UuidGenerator::v4()]);
 	}
 
 	private function hasInFlightTransfers(int $runId): bool {
