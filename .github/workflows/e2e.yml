@@ -42,50 +42,37 @@ jobs:
           docker compose -f /tmp/docker-compose.e2e.yml up -d
 
       # -----------------------------------------------------------------------
-      # 3. Install Nextcloud eagerly via occ maintenance:install
+      # 3. Wait for both Nextcloud instances to finish their entrypoint install
       #
-      # The nextcloud:*-apache image starts Apache immediately but defers the
-      # database schema installation to the first incoming HTTP request.  This
-      # means /status.php returns 503 for the duration of that install (which
-      # can take several minutes on a busy CI runner).  Triggering the install
-      # explicitly via `occ maintenance:install` makes the step deterministic
-      # and synchronous: once occ exits Nextcloud is fully installed and
-      # status.php will immediately return {"installed":true,...}.
-      #
-      # We wait for the container's entrypoint to finish copying files before
-      # running occ (the entrypoint writes /var/www/html/version.php last).
+      # NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD cause the image's
+      # entrypoint to run `occ maintenance:install` synchronously before Apache
+      # starts.  We poll /status.php until it returns {"installed":true}.
       # -----------------------------------------------------------------------
-      - name: Install Nextcloud on nc-source via occ
+      - name: Wait for nc-source to be ready
         run: |
-          echo "Waiting for nc-source entrypoint to finish file extraction…"
+          echo "Waiting for nc-source…"
           for i in $(seq 1 60); do
-            if docker exec nc-source test -f /var/www/html/version.php 2>/dev/null; then
-              echo "nc-source entrypoint ready (attempt $i)"
-              break
+            if curl -sf http://localhost:8081/status.php | grep -q '"installed":true'; then
+              echo "nc-source ready (attempt $i)"
+              exit 0
             fi
             sleep 5
           done
-          docker exec --user www-data nc-source php occ maintenance:install \
-            --database sqlite \
-            --admin-user  admin \
-            --admin-pass  adminpass \
-            --no-interaction
+          echo "nc-source did not become ready in time" >&2
+          exit 1
 
-      - name: Install Nextcloud on nc-target via occ
+      - name: Wait for nc-target to be ready
         run: |
-          echo "Waiting for nc-target entrypoint to finish file extraction…"
+          echo "Waiting for nc-target…"
           for i in $(seq 1 60); do
-            if docker exec nc-target test -f /var/www/html/version.php 2>/dev/null; then
-              echo "nc-target entrypoint ready (attempt $i)"
-              break
+            if curl -sf http://localhost:8082/status.php | grep -q '"installed":true'; then
+              echo "nc-target ready (attempt $i)"
+              exit 0
             fi
             sleep 5
           done
-          docker exec --user www-data nc-target php occ maintenance:install \
-            --database sqlite \
-            --admin-user  admin \
-            --admin-pass  adminpass \
-            --no-interaction
+          echo "nc-target did not become ready in time" >&2
+          exit 1
 
       # -----------------------------------------------------------------------
       # 4. Set trusted domain so HTTP requests from the runner are accepted

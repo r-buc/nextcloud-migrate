@@ -2,12 +2,10 @@
 # Source Nextcloud has the app installed; target is a clean instance.
 # Both are exposed on localhost so Playwright (running on the host) can reach them.
 #
-# NOTE: We intentionally do NOT set NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD
-# here.  Those env vars cause the image's entrypoint to run `occ maintenance:install`
-# inside the request handler (lazy install), which keeps /status.php returning 503
-# until the install finishes.  Instead, the CI workflow runs `occ maintenance:install`
-# explicitly via `docker exec` after the container is up, which is synchronous and
-# faster on constrained CI runners.
+# NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD cause the image's entrypoint to
+# run `occ maintenance:install` synchronously before Apache starts, so the instance
+# is fully installed and /status.php returns {"installed":true} as soon as the
+# container becomes healthy.
 
 services:
   nc-source:
@@ -15,6 +13,9 @@ services:
     container_name: nc-source
     ports:
       - "8081:80"
+    environment:
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: adminpass
     volumes:
       # Mount the app into custom_apps so occ can enable it.
       - ./:/var/www/html/custom_apps/nextcloud_migrate:ro
@@ -27,6 +28,9 @@ services:
     container_name: nc-target
     ports:
       - "8082:80"
+    environment:
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: adminpass
     volumes:
       - nc_target_data:/var/www/html/data
     networks:
