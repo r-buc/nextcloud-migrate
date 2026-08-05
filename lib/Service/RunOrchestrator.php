@@ -46,11 +46,16 @@ class RunOrchestrator {
 	private const DEFAULT_CONCURRENT_WORKERS = 1;
 	// How long a single TransferWorkerJob/VerifyWorkerJob execution keeps
 	// claiming and processing files in a loop before re-enqueueing itself,
-	// rather than handling exactly one file per execution. Bounded well
-	// under cron.php's 14-minute per-invocation budget, and kept modest
-	// enough to also be safe under ajax/webcron mode's per-request PHP
-	// execution time limits.
-	private const DEFAULT_BATCH_SECONDS = 20;
+	// rather than handling exactly one file per execution. cron.php (CLI
+	// mode) gives each invocation a 14-minute budget and typically runs
+	// every 5 minutes via system cron, so a multi-minute batch still
+	// leaves headroom for other apps' jobs in the same invocation. This
+	// app targets system cron for its 100k-file/1TB use case (not
+	// ajax/webcron, which is unsuitable for that scale regardless), so
+	// there's no need to keep this short enough for a typical web
+	// request's execution-time limit. Lower it via `occ config:app:set
+	// nextcloud_migrate batch_seconds` if running under ajax/webcron mode.
+	private const DEFAULT_BATCH_SECONDS = 240;
 
 	public function __construct(
 		private MigrationRunMapper $runMapper,
@@ -273,9 +278,10 @@ class RunOrchestrator {
 	 * should keep claiming and processing files before yielding back (by
 	 * re-enqueueing itself with a fresh token) instead of doing exactly one
 	 * file per execution. Configurable via `occ config:app:set
-	 * nextcloud_migrate batch_seconds --value=N` for deployments that only
-	 * use system cron (where longer batches reduce per-file job-queue
-	 * overhead further).
+	 * nextcloud_migrate batch_seconds --value=N` - lower it for ajax/webcron
+	 * deployments (where a single HTTP request's execution-time limit
+	 * applies), or raise it further for system-cron-only deployments that
+	 * want to spend more of cron.php's 14-minute budget per batch.
 	 */
 	public function getBatchSeconds(): int {
 		return (int)$this->config->getAppValue('nextcloud_migrate', 'batch_seconds', (string)self::DEFAULT_BATCH_SECONDS);
