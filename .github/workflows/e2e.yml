@@ -94,8 +94,9 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Enable nextcloud_migrate app on nc-source
         run: |
-          # The app is already mounted at /var/www/html/custom_apps/nextcloud_migrate
-          # via the volume in docker-compose.e2e.yml. We just need to enable it.
+          # Install the app from the bind-mounted repo into the writable apps dir,
+          # then enable it. `occ` validates the apps directory even for app:enable.
+          docker exec nc-source sh -c 'rm -rf /var/www/html/apps/nextcloud_migrate && cp -R /var/www/html/custom_apps/nextcloud_migrate /var/www/html/apps/nextcloud_migrate && chown -R www-data:www-data /var/www/html/apps/nextcloud_migrate'
           docker exec --user www-data nc-source php occ app:enable nextcloud_migrate
 
       # -----------------------------------------------------------------------
