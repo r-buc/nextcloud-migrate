@@ -1,0 +1,174 @@
+name: End-to-End Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E – Nextcloud ${{ matrix.nextcloud }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        nextcloud: ["28", "29"]
+
+    env:
+      SOURCE_URL: http://localhost:8081
+      TARGET_URL: http://localhost:8082
+      ADMIN_PASS: adminpass
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Start both Nextcloud instances
+      #    We override the image tag via an env var so we can matrix over NC versions.
+      # -----------------------------------------------------------------------
+      - name: Start Nextcloud containers
+        env:
+          NC_IMAGE: nextcloud:${{ matrix.nextcloud }}-apache
+          APP_SOURCE_PATH: ${{ github.workspace }}
+        run: |
+          # Substitute the image tag before docker compose reads the file
+          sed "s|nextcloud:28-apache|${NC_IMAGE}|g" docker-compose.e2e.yml > /tmp/docker-compose.e2e.yml
+          docker compose -f /tmp/docker-compose.e2e.yml up -d
+
+      - name: Disable App Store during bootstrap
+        run: |
+          for container in nc-source nc-target; do
+            docker exec "$container" sh -c "mkdir -p /var/www/html/config && printf '%s\n' '<?php' '\$CONFIG = [' \"  '\\''appstoreenabled'\\'' => false,\" '];' > /var/www/html/config/zz-e2e.config.php"
+          done
+
+      # -----------------------------------------------------------------------
+      # 3. Install Nextcloud via occ maintenance:install
+      #
+      # The entrypoint copies all Nextcloud files and sets up ownership before
+      # printing "Initializing finished".  We wait for that log line before
+      # calling occ to guarantee the apps/ directory exists and is writable.
+      # -----------------------------------------------------------------------
+      - name: Install Nextcloud on nc-source
+        run: |
+          echo "Waiting for nc-source entrypoint to finish…"
+          for i in $(seq 1 60); do
+            if docker logs nc-source 2>&1 | grep -q "Initializing finished"; then
+              echo "nc-source entrypoint done (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          docker exec --user www-data nc-source php occ maintenance:install \
+            --database sqlite \
+            --admin-user admin \
+            --admin-pass adminpass \
+            --no-interaction
+
+      - name: Install Nextcloud on nc-target
+        run: |
+          echo "Waiting for nc-target entrypoint to finish…"
+          for i in $(seq 1 60); do
+            if docker logs nc-target 2>&1 | grep -q "Initializing finished"; then
+              echo "nc-target entrypoint done (attempt $i)"
+              break
+            fi
+            sleep 5
+          done
+          docker exec --user www-data nc-target php occ maintenance:install \
+            --database sqlite \
+            --admin-user admin \
+            --admin-pass adminpass \
+            --no-interaction
+
+      # -----------------------------------------------------------------------
+      # 4. Set trusted domain so HTTP requests from the runner are accepted
+      # -----------------------------------------------------------------------
+      - name: Configure trusted domains
+        run: |
+          docker exec --user www-data nc-source php occ config:system:set trusted_domains 1 --value=localhost
+          docker exec --user www-data nc-target  php occ config:system:set trusted_domains 1 --value=localhost
+
+      # -----------------------------------------------------------------------
+      # 5. Install and enable the app on nc-source
+      # -----------------------------------------------------------------------
+      - name: Enable nextcloud_migrate app on nc-source
+        run: |
+          # Copy the checked-out app into the writable custom_apps volume, then enable it.
+          docker exec nc-source sh -c 'rm -rf /var/www/html/custom_apps/nextcloud_migrate && cp -R /workspace/nextcloud_migrate /var/www/html/custom_apps/nextcloud_migrate && chown -R www-data:www-data /var/www/html/custom_apps/nextcloud_migrate'
+          docker exec --user www-data nc-source php occ app:enable nextcloud_migrate
+
+      # -----------------------------------------------------------------------
+      # 6. Install Node.js
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      # -----------------------------------------------------------------------
+      # 7. Install Playwright and dependencies
+      # -----------------------------------------------------------------------
+      - name: Install npm dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+
+      # -----------------------------------------------------------------------
+      # 8. Run the E2E test suite
+      # -----------------------------------------------------------------------
+      - name: Run Playwright tests
+        working-directory: tests/e2e
+        env:
+          SOURCE_URL: ${{ env.SOURCE_URL }}
+          TARGET_URL: ${{ env.TARGET_URL }}
+        run: npx playwright test
+
+      # -----------------------------------------------------------------------
+      # 9. Upload test artifacts on failure
+      # -----------------------------------------------------------------------
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-nc${{ matrix.nextcloud }}
+          path: tests/e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results (screenshots / videos / traces)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-nc${{ matrix.nextcloud }}
+          path: tests/e2e/test-results/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 10. Always print container logs for post-mortem debugging
+      # -----------------------------------------------------------------------
+      - name: Print nc-source logs on failure
+        if: failure()
+        run: docker logs nc-source --tail 100
+
+      - name: Print nc-target logs on failure
+        if: failure()
+        run: docker logs nc-target --tail 100
+
+      # -----------------------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------------------
+      - name: Stop containers
+        if: always()
+        run: docker compose -f /tmp/docker-compose.e2e.yml down -v

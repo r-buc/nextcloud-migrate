@@ -1,0 +1,15 @@
+{
+  "name": "nextcloud-migrate-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end tests for the nextcloud_migrate app",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/node": "^20.0.0"
+  }
+}

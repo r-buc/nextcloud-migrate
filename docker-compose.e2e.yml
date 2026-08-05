@@ -1,0 +1,42 @@
+# Docker Compose configuration for end-to-end tests.
+# Source Nextcloud has the app installed; target is a clean instance.
+# Both are exposed on localhost so Playwright (running on the host) can reach them.
+#
+# We do NOT set NEXTCLOUD_ADMIN_USER / NEXTCLOUD_ADMIN_PASSWORD here because
+# those env vars only configure autoconfig.php for a lazy first-request install,
+# which returns 503 until the install completes and can fail when volumes are
+# present.  Instead, the CI workflow runs `occ maintenance:install` explicitly
+# via `docker exec` after the entrypoint has fully finished (signalled by the
+# "Initializing finished" log line), ensuring correct file ownership.
+
+services:
+  nc-source:
+    image: nextcloud:28-apache
+    container_name: nc-source
+    ports:
+      - "8081:80"
+    volumes:
+      # Mount the app source read-only and provide a writable custom_apps volume.
+      - ${APP_SOURCE_PATH:-.}:/workspace/nextcloud_migrate:ro
+      - nc_source_custom_apps:/var/www/html/custom_apps
+      - nc_source_data:/var/www/html/data
+    networks:
+      - e2e
+
+  nc-target:
+    image: nextcloud:28-apache
+    container_name: nc-target
+    ports:
+      - "8082:80"
+    volumes:
+      - nc_target_data:/var/www/html/data
+    networks:
+      - e2e
+
+volumes:
+  nc_source_data:
+  nc_source_custom_apps:
+  nc_target_data:
+
+networks:
+  e2e:
