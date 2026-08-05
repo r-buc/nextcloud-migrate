@@ -41,53 +41,67 @@ jobs:
           docker compose -f /tmp/docker-compose.e2e.yml up -d
 
       # -----------------------------------------------------------------------
-      # 3. Wait for both instances to be healthy
+      # 3. Install Nextcloud eagerly via occ maintenance:install
+      #
+      # The nextcloud:*-apache image starts Apache immediately but defers the
+      # database schema installation to the first incoming HTTP request.  This
+      # means /status.php returns 503 for the duration of that install (which
+      # can take several minutes on a busy CI runner).  Triggering the install
+      # explicitly via `occ maintenance:install` makes the step deterministic
+      # and synchronous: once occ exits Nextcloud is fully installed and
+      # status.php will immediately return {"installed":true,...}.
+      #
+      # We wait for the container's entrypoint to finish copying files before
+      # running occ (the entrypoint writes /var/www/html/version.php last).
       # -----------------------------------------------------------------------
-      - name: Wait for nc-source to become healthy
+      - name: Install Nextcloud on nc-source via occ
         run: |
-          echo "Waiting for nc-source (port 8081)…"
+          echo "Waiting for nc-source entrypoint to finish file extraction…"
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8081/status.php | grep -q '"installed":true'; then
-              echo "nc-source is ready (attempt $i)"
-              exit 0
+            if docker exec nc-source test -f /var/www/html/version.php 2>/dev/null; then
+              echo "nc-source entrypoint ready (attempt $i)"
+              break
             fi
             sleep 5
           done
-          echo "::error::nc-source did not become healthy in time"
-          docker logs nc-source --tail 50
-          exit 1
+          docker exec --user www-data nc-source php occ maintenance:install \
+            --database sqlite \
+            --admin-user  admin \
+            --admin-pass  adminpass \
+            --no-interaction
 
-      - name: Wait for nc-target to become healthy
+      - name: Install Nextcloud on nc-target via occ
         run: |
-          echo "Waiting for nc-target (port 8082)…"
+          echo "Waiting for nc-target entrypoint to finish file extraction…"
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8082/status.php | grep -q '"installed":true'; then
-              echo "nc-target is ready (attempt $i)"
-              exit 0
+            if docker exec nc-target test -f /var/www/html/version.php 2>/dev/null; then
+              echo "nc-target entrypoint ready (attempt $i)"
+              break
             fi
             sleep 5
           done
-          echo "::error::nc-target did not become healthy in time"
-          docker logs nc-target --tail 50
-          exit 1
+          docker exec --user www-data nc-target php occ maintenance:install \
+            --database sqlite \
+            --admin-user  admin \
+            --admin-pass  adminpass \
+            --no-interaction
 
       # -----------------------------------------------------------------------
-      # 4. Install and enable the app on nc-source
+      # 4. Set trusted domain so HTTP requests from the runner are accepted
+      # -----------------------------------------------------------------------
+      - name: Configure trusted domains
+        run: |
+          docker exec --user www-data nc-source php occ config:system:set trusted_domains 1 --value=localhost
+          docker exec --user www-data nc-target  php occ config:system:set trusted_domains 1 --value=localhost
+
+      # -----------------------------------------------------------------------
+      # 5. Install and enable the app on nc-source
       # -----------------------------------------------------------------------
       - name: Enable nextcloud_migrate app on nc-source
         run: |
           # The app is already mounted at /var/www/html/custom_apps/nextcloud_migrate
           # via the volume in docker-compose.e2e.yml. We just need to enable it.
           docker exec --user www-data nc-source php occ app:enable nextcloud_migrate
-
-      # -----------------------------------------------------------------------
-      # 5. Create test users on both instances
-      # -----------------------------------------------------------------------
-      - name: Create source admin app-password seed user
-        run: |
-          # Ensure the built-in admin account can generate tokens later.
-          # Nothing to do – admin was created by the Nextcloud image NEXTCLOUD_ADMIN_USER env.
-          echo "Admin user is ready."
 
       # -----------------------------------------------------------------------
       # 6. Install Node.js
