@@ -10,6 +10,7 @@ use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\DiscoveryService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
+use OCA\NextcloudMigrate\Util\JobScheduling;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -106,8 +107,11 @@ class DiscoveryJob extends QueuedJob {
 			// a new one. cron.php aborts its entire run (not just this job)
 			// the moment it sees the same job row id twice in one pass, so an
 			// unchanging argument here would prematurely kill cron.php after
-			// only one batch's worth of discovery.
-			$this->jobList->add(self::class, ['runId' => $runId, 'nonce' => UuidGenerator::v4()]);
+			// only one batch's worth of discovery. The explicit firstCheck
+			// also gets this new row picked up within the SAME cron.php pass
+			// rather than losing a last_checked tie-break to CleanupLocksJob
+			// (see JobScheduling::IMMEDIATE_FIRST_CHECK).
+			$this->jobList->add(self::class, ['runId' => $runId, 'nonce' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 		} else {
 			$this->runOrchestrator->onDiscoveryComplete($runId);
 		}

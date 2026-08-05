@@ -106,7 +106,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_DRY_RUN_READY));
 		$this->jobList->expects($this->once())
 			->method('add')
-			->with(EnqueueTransfersJob::class, ['runId' => 42]);
+			->with(EnqueueTransfersJob::class, ['runId' => 42], 0);
 
 		$run = $this->orchestrator->approveRun(42, 'admin');
 
@@ -159,7 +159,7 @@ final class RunOrchestratorTest extends TestCase {
 		]);
 		$this->jobList->expects($this->once())
 			->method('add')
-			->with(EnqueueTransfersJob::class, ['runId' => 42]);
+			->with(EnqueueTransfersJob::class, ['runId' => 42], 0);
 
 		$run = $this->orchestrator->resumeRun(42);
 
@@ -180,7 +180,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->userMapMapper->method('findByRun')->willReturn([$userMapA, $userMapB]);
 		$this->jobList->expects($this->exactly(2))
 			->method('add')
-			->with(VerifyWorkerJob::class, self::callback(fn ($arg) => $arg['runId'] === 42));
+			->with(VerifyWorkerJob::class, self::callback(fn ($arg) => $arg['runId'] === 42), 0);
 
 		$run = $this->orchestrator->resumeRun(42);
 
@@ -194,7 +194,7 @@ final class RunOrchestratorTest extends TestCase {
 		]);
 		$this->jobList->expects($this->once())
 			->method('add')
-			->with(FinalizeJob::class, ['runId' => 42]);
+			->with(FinalizeJob::class, ['runId' => 42], 0);
 
 		$run = $this->orchestrator->resumeRun(42);
 

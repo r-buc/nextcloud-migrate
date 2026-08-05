@@ -12,6 +12,7 @@ use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
+use OCA\NextcloudMigrate\Util\JobScheduling;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 use Psr\Log\LoggerInterface;
 
@@ -66,7 +67,12 @@ class EnqueueTransfersJob extends QueuedJob {
 			if ($userMap->getState() === UserMap::STATE_FAILED) {
 				continue;
 			}
-			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()]);
+			// Backdated firstCheck so these get run within the SAME cron.php
+			// pass that's executing this job, instead of possibly losing a
+			// last_checked tie-break against an already-executed job this
+			// pass (see JobScheduling::IMMEDIATE_FIRST_CHECK) and sitting
+			// idle for a full cron interval before their first execution.
+			$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 			$spawned++;
 		}
 

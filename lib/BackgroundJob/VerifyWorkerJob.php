@@ -18,6 +18,7 @@ use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
 use Psr\Log\LoggerInterface;
+use OCA\NextcloudMigrate\Util\JobScheduling;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
@@ -176,11 +177,13 @@ class VerifyWorkerJob extends QueuedJob {
 		// A fresh token per re-enqueue (rather than reusing $workerToken) is
 		// required - see the detailed comment in TransferWorkerJob's final
 		// re-enqueue for why a stable argument here would silently cap
-		// throughput and can abort cron.php's whole run early.
+		// throughput and can abort cron.php's whole run early. The backdated
+		// firstCheck similarly ensures this new row is picked up within the
+		// SAME pass (see JobScheduling::IMMEDIATE_FIRST_CHECK).
 		$this->logger->debug("VerifyWorkerJob batch processed {$processed} file(s) for user map {$userMapId} (run {$runId}) before yielding", [
 			'app' => 'nextcloud_migrate',
 		]);
-		$this->jobList->add(self::class, ['runId' => $runId, 'userMapId' => $userMapId, 'workerToken' => UuidGenerator::v4()]);
+		$this->jobList->add(self::class, ['runId' => $runId, 'userMapId' => $userMapId, 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 	}
 
 	private function hasInFlightVerifications(int $runId, int $userMapId): bool {

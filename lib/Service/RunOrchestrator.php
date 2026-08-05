@@ -20,6 +20,7 @@ use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\BackgroundJob\IJobList;
 use OCP\IConfig;
+use OCA\NextcloudMigrate\Util\JobScheduling;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
@@ -217,7 +218,11 @@ class RunOrchestrator {
 		$run->setUpdatedAt(time());
 		$this->runMapper->update($run);
 
-		$this->jobList->add(DiscoveryJob::class, ['runId' => $runId]);
+		// Backdated firstCheck so this is treated as already-overdue and gets
+		// picked up on cron.php's very next pass ahead of routine periodic
+		// jobs, rather than losing a last_checked tie-break to one of those
+		// (see JobScheduling::IMMEDIATE_FIRST_CHECK).
+		$this->jobList->add(DiscoveryJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 
 		return $run;
 	}
@@ -256,7 +261,7 @@ class RunOrchestrator {
 
 		$this->eventLogger->log($runId, 'run_approved', "Run approved by {$approvedBy}");
 
-		$this->jobList->add(EnqueueTransfersJob::class, ['runId' => $runId]);
+		$this->jobList->add(EnqueueTransfersJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 
 		return $run;
 	}
@@ -329,7 +334,7 @@ class RunOrchestrator {
 
 			$this->eventLogger->log($runId, 'transfer_completed', 'All transferable files processed; verification skipped for this run, finalizing');
 
-			$this->jobList->add(FinalizeJob::class, ['runId' => $runId]);
+			$this->jobList->add(FinalizeJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 
 			return;
 		}
@@ -377,7 +382,7 @@ class RunOrchestrator {
 
 		$this->eventLogger->log($runId, 'verification_completed', 'Verification pool drained; finalizing run');
 
-		$this->jobList->add(FinalizeJob::class, ['runId' => $runId]);
+		$this->jobList->add(FinalizeJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 	}
 
 	public function finalizeRun(int $runId): void {
@@ -439,7 +444,7 @@ class RunOrchestrator {
 		if ($transferableRemaining > 0) {
 			$run->setState(MigrationRun::STATE_TRANSFERRING);
 			$this->runMapper->update($run);
-			$this->jobList->add(EnqueueTransfersJob::class, ['runId' => $runId]);
+			$this->jobList->add(EnqueueTransfersJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 		} elseif ($verifiableRemaining > 0) {
 			$run->setState(MigrationRun::STATE_VERIFYING);
 			$this->runMapper->update($run);
@@ -447,7 +452,7 @@ class RunOrchestrator {
 		} else {
 			$run->setState(MigrationRun::STATE_FINALIZING);
 			$this->runMapper->update($run);
-			$this->jobList->add(FinalizeJob::class, ['runId' => $runId]);
+			$this->jobList->add(FinalizeJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 		}
 
 		$this->eventLogger->log($runId, 'run_resumed', "Run resumed into state {$run->getState()}");
@@ -525,7 +530,7 @@ class RunOrchestrator {
 			if ($userMap->getState() === UserMap::STATE_FAILED) {
 				continue;
 			}
-			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()]);
+			$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 		}
 	}
 

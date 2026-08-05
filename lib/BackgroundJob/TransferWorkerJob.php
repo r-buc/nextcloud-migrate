@@ -19,6 +19,7 @@ use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\IJobList;
 use OCP\BackgroundJob\QueuedJob;
 use Psr\Log\LoggerInterface;
+use OCA\NextcloudMigrate\Util\JobScheduling;
 use OCA\NextcloudMigrate\Util\UuidGenerator;
 
 /**
@@ -206,11 +207,14 @@ class TransferWorkerJob extends QueuedJob {
 		// (not just this job) the moment getNext() returns a row id it
 		// already executed this pass, so reusing the same row per lineage
 		// would cap throughput at one batch's worth of files per cron
-		// invocation, however much of the 14-minute budget remained.
+		// invocation, however much of the 14-minute budget remained. The
+		// backdated firstCheck similarly ensures this new row is picked up
+		// within the SAME pass rather than losing a last_checked tie-break
+		// (see JobScheduling::IMMEDIATE_FIRST_CHECK).
 		$this->logger->debug("TransferWorkerJob batch processed {$processed} file(s) for user map {$userMapId} (run {$runId}) before yielding", [
 			'app' => 'nextcloud_migrate',
 		]);
-		$this->jobList->add(self::class, ['runId' => $runId, 'userMapId' => $userMapId, 'workerToken' => UuidGenerator::v4()]);
+		$this->jobList->add(self::class, ['runId' => $runId, 'userMapId' => $userMapId, 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 	}
 
 	private function hasInFlightTransfers(int $runId, int $userMapId): bool {

@@ -57,7 +57,22 @@ ACLs.
   mid-job. `CleanupLocksJob` reclaims rows left behind by a crashed worker.
   The run only advances past TRANSFERRING/VERIFYING once every user's
   lineage has drained (`RunOrchestrator::onUserTransferComplete()`/
-  `onUserVerificationComplete()`).
+  `onUserVerificationComplete()`). Every job that queues follow-up work for
+  itself or another job class (self-re-enqueues, `EnqueueTransfersJob`
+  spawning workers, phase-transition handoffs to `FinalizeJob`/
+  `VerifyWorkerJob`, etc.) backdates that job's `IJobList::add()`
+  `$firstCheck` to the epoch (`Util\JobScheduling::IMMEDIATE_FIRST_CHECK`).
+  Without this, a newly-queued job's `last_checked` column is "now" - tied
+  with (or later than) periodic jobs like `CleanupLocksJob` that cron.php
+  already re-touched to "now" earlier in the very same pass - and
+  `getNext()`'s `ORDER BY last_checked ASC` can hand cron.php that already-
+  executed job a second time, tripping its `$executedJobs` dedup guard and
+  aborting the *entire* cron.php invocation early, stranding the real new
+  work until the next scheduled tick (confirmed via real cron logs: a
+  spawned `TransferWorkerJob` sat idle for a full 5-minute system-cron
+  interval before its first execution). Backdating guarantees the new job
+  always sorts first and gets picked up within the same pass that queued
+  it.
 - **Run lifecycle**: `CREATED -> VALIDATING -> DISCOVERING -> DRY_RUN_READY
   -> APPROVED -> TRANSFERRING -> VERIFYING -> FINALIZING -> COMPLETED |
   COMPLETED_WITH_ERRORS`, with `PAUSED`/`CANCELLED`/`VALIDATION_FAILED`
