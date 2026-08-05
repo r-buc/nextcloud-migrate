@@ -1,0 +1,156 @@
+name: End-to-End Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E – Nextcloud ${{ matrix.nextcloud }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nextcloud: ["28", "29"]
+
+    env:
+      SOURCE_URL: http://localhost:8081
+      TARGET_URL: http://localhost:8082
+      ADMIN_PASS: adminpass
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout
+      # -----------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Start both Nextcloud instances
+      #    We override the image tag via an env var so we can matrix over NC versions.
+      # -----------------------------------------------------------------------
+      - name: Start Nextcloud containers
+        env:
+          NC_IMAGE: nextcloud:${{ matrix.nextcloud }}-apache
+        run: |
+          # Substitute the image tag before docker compose reads the file
+          sed "s|nextcloud:28-apache|${NC_IMAGE}|g" docker-compose.e2e.yml > /tmp/docker-compose.e2e.yml
+          docker compose -f /tmp/docker-compose.e2e.yml up -d
+
+      # -----------------------------------------------------------------------
+      # 3. Wait for both instances to be healthy
+      # -----------------------------------------------------------------------
+      - name: Wait for nc-source to become healthy
+        run: |
+          echo "Waiting for nc-source (port 8081)…"
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8081/status.php | grep -q '"installed":true'; then
+              echo "nc-source is ready (attempt $i)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::nc-source did not become healthy in time"
+          docker logs nc-source --tail 50
+          exit 1
+
+      - name: Wait for nc-target to become healthy
+        run: |
+          echo "Waiting for nc-target (port 8082)…"
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8082/status.php | grep -q '"installed":true'; then
+              echo "nc-target is ready (attempt $i)"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::nc-target did not become healthy in time"
+          docker logs nc-target --tail 50
+          exit 1
+
+      # -----------------------------------------------------------------------
+      # 4. Install and enable the app on nc-source
+      # -----------------------------------------------------------------------
+      - name: Enable nextcloud_migrate app on nc-source
+        run: |
+          # The app is already mounted at /var/www/html/custom_apps/nextcloud_migrate
+          # via the volume in docker-compose.e2e.yml. We just need to enable it.
+          docker exec --user www-data nc-source php occ app:enable nextcloud_migrate
+
+      # -----------------------------------------------------------------------
+      # 5. Create test users on both instances
+      # -----------------------------------------------------------------------
+      - name: Create source admin app-password seed user
+        run: |
+          # Ensure the built-in admin account can generate tokens later.
+          # Nothing to do – admin was created by the Nextcloud image NEXTCLOUD_ADMIN_USER env.
+          echo "Admin user is ready."
+
+      # -----------------------------------------------------------------------
+      # 6. Install Node.js
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tests/e2e/package.json
+
+      # -----------------------------------------------------------------------
+      # 7. Install Playwright and dependencies
+      # -----------------------------------------------------------------------
+      - name: Install npm dependencies
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+
+      # -----------------------------------------------------------------------
+      # 8. Run the E2E test suite
+      # -----------------------------------------------------------------------
+      - name: Run Playwright tests
+        working-directory: tests/e2e
+        env:
+          SOURCE_URL: ${{ env.SOURCE_URL }}
+          TARGET_URL: ${{ env.TARGET_URL }}
+        run: npx playwright test
+
+      # -----------------------------------------------------------------------
+      # 9. Upload test artifacts on failure
+      # -----------------------------------------------------------------------
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-nc${{ matrix.nextcloud }}
+          path: tests/e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results (screenshots / videos / traces)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-nc${{ matrix.nextcloud }}
+          path: tests/e2e/test-results/
+          retention-days: 7
+
+      # -----------------------------------------------------------------------
+      # 10. Always print container logs for post-mortem debugging
+      # -----------------------------------------------------------------------
+      - name: Print nc-source logs on failure
+        if: failure()
+        run: docker logs nc-source --tail 100
+
+      - name: Print nc-target logs on failure
+        if: failure()
+        run: docker logs nc-target --tail 100
+
+      # -----------------------------------------------------------------------
+      # Cleanup
+      # -----------------------------------------------------------------------
+      - name: Stop containers
+        if: always()
+        run: docker compose -f /tmp/docker-compose.e2e.yml down -v
