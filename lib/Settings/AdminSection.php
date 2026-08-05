@@ -4,9 +4,15 @@ declare(strict_types=1);
 
 namespace OCA\NextcloudMigrate\Settings;
 
+use OCP\IURLGenerator;
 use OCP\Settings\IIconSection;
 
 class AdminSection implements IIconSection {
+	public function __construct(
+		private IURLGenerator $urlGenerator,
+	) {
+	}
+
 	public function getID(): string {
 		return 'nextcloud_migrate';
 	}
@@ -20,6 +26,6 @@ class AdminSection implements IIconSection {
 	}
 
 	public function getIcon(): string {
-		return \OCP\Util::imagePath('core', 'actions/download.svg');
+		return $this->urlGenerator->imagePath('core', 'actions/download.svg');
 	}
 }
