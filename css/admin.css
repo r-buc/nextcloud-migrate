@@ -38,3 +38,34 @@
 	min-width: 3.5em;
 	text-align: right;
 }
+
+/* Mirrors the quota column on Nextcloud's own Users admin page: a text
+   label above a slim progress bar (that page uses the Vue-only
+   NcProgressBar component, so this replicates its linear/small styling
+   directly on a plain <progress> element instead). */
+#nextcloud-migrate-admin .ncm-volume-bar {
+	display: block;
+	width: 100%;
+	height: 4px;
+	margin-top: 4px;
+	border: 0;
+	padding: 0;
+	overflow: hidden;
+	border-radius: 2px;
+	background: var(--color-background-dark);
+}
+
+#nextcloud-migrate-admin .ncm-volume-bar::-webkit-progress-bar {
+	height: 4px;
+	background-color: transparent;
+}
+
+#nextcloud-migrate-admin .ncm-volume-bar::-webkit-progress-value {
+	background: var(--color-primary-element);
+	border-radius: 2px;
+}
+
+#nextcloud-migrate-admin .ncm-volume-bar::-moz-progress-bar {
+	background: var(--color-primary-element);
+	border-radius: 2px;
+}

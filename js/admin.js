@@ -226,14 +226,35 @@
 				userMap.targetUserId,
 				String(userMap.totalFiles),
 				String(userMap.transferredFiles),
-				formatBytes(userMap.transferredBytes) + ' / ' + formatBytes(userMap.totalBytes),
 			].forEach(function (text) {
 				const cell = document.createElement('td');
 				cell.textContent = text;
 				row.appendChild(cell);
 			});
+			row.appendChild(buildVolumeCell(userMap.transferredBytes, userMap.totalBytes));
 			tbody.appendChild(row);
 		});
+	}
+
+	// Mirrors the look of the quota column on Nextcloud's own Users admin
+	// page (a text label above a slim NcProgressBar-style bar): a label
+	// with the byte counts, then a native <progress> element styled to
+	// match (see .ncm-volume-bar in css/admin.css).
+	function buildVolumeCell(transferredBytes, totalBytes) {
+		const cell = document.createElement('td');
+
+		const label = document.createElement('span');
+		label.textContent = formatBytes(transferredBytes) + ' / ' + formatBytes(totalBytes);
+		cell.appendChild(label);
+
+		const percent = totalBytes > 0 ? Math.min(100, Math.round((transferredBytes / totalBytes) * 100)) : 0;
+		const bar = document.createElement('progress');
+		bar.className = 'ncm-volume-bar';
+		bar.max = 100;
+		bar.value = percent;
+		cell.appendChild(bar);
+
+		return cell;
 	}
 
 	function refreshRunDetail() {
