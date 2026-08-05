@@ -36,7 +36,14 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
  *   Any non-terminal state -> CANCELLED
  */
 class RunOrchestrator {
-	private const DEFAULT_CONCURRENT_WORKERS = 5;
+	// Single worker by default: with the internal batching in
+	// TransferWorkerJob/VerifyWorkerJob (each execution now processes many
+	// files per cron tick, not just one), a single sequential worker avoids
+	// the lock-contention/race-handling complexity of a concurrent pool
+	// entirely while still getting good throughput. Still configurable via
+	// `occ config:app:set nextcloud_migrate concurrent_workers --value=N`
+	// for anyone who wants to re-enable parallelism for very large runs.
+	private const DEFAULT_CONCURRENT_WORKERS = 1;
 	// How long a single TransferWorkerJob/VerifyWorkerJob execution keeps
 	// claiming and processing files in a loop before re-enqueueing itself,
 	// rather than handling exactly one file per execution. Bounded well
