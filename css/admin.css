@@ -10,3 +10,31 @@
 	overflow: auto;
 	border-radius: var(--border-radius);
 }
+
+#nextcloud-migrate-admin #ncm-quick table.grid {
+	margin-bottom: 12px;
+}
+
+#nextcloud-migrate-admin #ncm-quick table.grid td,
+#nextcloud-migrate-admin #ncm-quick table.grid th {
+	padding-top: 0.5em;
+	padding-bottom: 0.5em;
+}
+
+#nextcloud-migrate-admin #ncm-quick-users-table th:first-child,
+#nextcloud-migrate-admin #ncm-quick-users-table td:first-child {
+	width: 2em;
+	padding-right: 0;
+}
+
+#nextcloud-migrate-admin #ncm-quick-progressbar {
+	width: 100%;
+	height: 1.2em;
+	border-radius: var(--border-radius);
+}
+
+#nextcloud-migrate-admin #ncm-quick-percent {
+	display: inline-block;
+	min-width: 3.5em;
+	text-align: right;
+}

@@ -158,7 +158,7 @@
 		if (pollTimer) {
 			return;
 		}
-		pollTimer = setInterval(refreshRunDetail, 4000);
+		pollTimer = setInterval(refreshRunDetail, 1000);
 	}
 
 	function stopPolling() {

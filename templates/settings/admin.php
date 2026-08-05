@@ -55,7 +55,7 @@
 				</select>
 			</p>
 
-			<table id="ncm-quick-users-table">
+			<table id="ncm-quick-users-table" class="grid">
 				<thead>
 					<tr>
 						<th></th>
@@ -73,12 +73,12 @@
 		<div id="ncm-quick-progress" hidden>
 			<p id="ncm-quick-status" class="settings-hint"></p>
 			<p>
-				<progress id="ncm-quick-progressbar" max="100" value="0" style="width: 100%;"></progress>
+				<progress id="ncm-quick-progressbar" max="100" value="0"></progress>
 				<span id="ncm-quick-percent">0%</span>
 			</p>
 			<p id="ncm-quick-error" class="settings-hint" hidden></p>
 
-			<table id="ncm-quick-user-table">
+			<table id="ncm-quick-user-table" class="grid">
 				<thead>
 					<tr>
 						<th>Local user</th>
