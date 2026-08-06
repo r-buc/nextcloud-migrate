@@ -43,28 +43,42 @@ ACLs.
   This is a point-in-time migration, not continuous sync: edits made only
   *after* a file has already been verified are not detected or re-migrated.
   Avoid heavy write activity on the source during a run.
-- **Stale source filecache metadata**: the torn-read guard above also
-  compares the number of bytes *actually read* against the file's reported
-  `getSize()` - even when mtime/size report completely unchanged before
-  and after the read. A file whose filecache `size` column doesn't match
-  its real readable content (seen in practice on old files, years-old data
-  left inconsistent by a historical Nextcloud client/server sync bug) would
-  otherwise get a WRONG Content-Length declared to the target; a reverse
-  proxy/WAF in front of the target instance can then reject the request
-  outright with a generic, unhelpful error (e.g. a bare "400 Bad Request"
-  HTML page with no Nextcloud-side detail at all, identical across every
-  affected file regardless of path/size/type). For a single (non-chunked)
-  PUT, the read always continues to the stream's real EOF regardless of
-  the declared size, so there's no risk of a truncated upload here: the
-  mismatch is simply logged (not treated as a failure) and the upload
-  proceeds using the actual byte count. As a side effect,
-  `TransferService` also corrects the source's own stale filecache entry
-  via the public `IStorage::getCache()`/`ICache::update()` OCP APIs, since
-  the correct size is already known - no full rescan needed. Chunked
-  (large-file) transfers keep the stricter abort-and-retry behavior for
-  this same mismatch, since their upload loop is itself sized off the
-  (possibly stale) reported size rather than the stream's real EOF, so a
-  real file *larger* than reported would otherwise be silently truncated.
+- **Leftover server-side encryption**: if the source instance ever had
+  Nextcloud's own server-side encryption enabled and later disabled it
+  *without* first running `occ encryption:decrypt-all`, those older files
+  stay physically encrypted on disk - and once the encryption app is off,
+  the standard Files API's decrypt-on-read no longer applies to them, so
+  reading one returns raw ciphertext starting with Nextcloud's own
+  encryption header (`HBEGIN:oc_encryption_module:...`, see
+  `\OC\Encryption\Util`). `TransferService` detects that exact marker at
+  the start of a file's content and fails it immediately with an
+  actionable message, instead of silently uploading unreadable ciphertext
+  to the target with no warning. Fix on the source instance: re-enable
+  the encryption app and run `occ encryption:decrypt-all`, then retry the
+  affected file(s).
+- **Stale source filecache metadata**: separately, the torn-read guard
+  above also compares the number of bytes *actually read* against the
+  file's reported `getSize()` - even when mtime/size report completely
+  unchanged before and after the read. A file whose filecache `size`
+  column doesn't match its real readable content would otherwise get a
+  WRONG Content-Length declared to the target; a reverse proxy/WAF in
+  front of the target instance can then reject the request outright with
+  a generic, unhelpful error (e.g. a bare "400 Bad Request" HTML page with
+  no Nextcloud-side detail at all, identical across every affected file
+  regardless of path/size/type) - this is actually how the encryption
+  issue above was first noticed, before its real cause was identified. For
+  a single (non-chunked) PUT, the read always continues to the stream's
+  real EOF regardless of the declared size, so there's no risk of a
+  truncated upload here: the mismatch is simply logged (not treated as a
+  failure) and the upload proceeds using the actual byte count - this is
+  NOT auto-corrected in the filecache, since for an encrypted file the
+  correct column would be `unencrypted_size`, not `size` (which is meant
+  to reflect the larger, physical/ciphertext footprint), and there's no
+  reliable way to tell which case applies from here. Chunked (large-file)
+  transfers keep the stricter abort-and-retry behavior for this same
+  mismatch, since their upload loop is itself sized off the (possibly
+  stale) reported size rather than the stream's real EOF, so a real file
+  *larger* than reported would otherwise be silently truncated.
 - **Orchestration**: entirely native Nextcloud background jobs (no
   Redis/external queue). One self-perpetuating `TransferWorkerJob` (then
   one `VerifyWorkerJob`) lineage per mapped user, each processing many

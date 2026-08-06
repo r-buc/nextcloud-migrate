@@ -48,6 +48,18 @@ class TransferService {
 	// limit is ever raised again.
 	private const BACKOFF_SECONDS = [1, 5, 30, 300];
 
+	// The literal marker Nextcloud's own server-side encryption writes at
+	// the very start of an encrypted file's PHYSICAL content (see
+	// \OC\Encryption\Util::HEADER_START/parseRawHeader() - "HBEGIN:" is
+	// always immediately followed by the "oc_encryption_module" key). If a
+	// file's Files-API-level read still starts with this, Nextcloud's own
+	// decrypt-on-read wrapper isn't decrypting it for us - almost always
+	// because the encryption app is (now) disabled/uninstalled on the
+	// source instance, or the reading user's encryption keys aren't
+	// available - so what we're reading is raw ciphertext, not the file's
+	// real content.
+	private const ENCRYPTION_HEADER_MARKER = 'HBEGIN:oc_encryption_module:';
+
 	public function __construct(
 		private IRootFolder $rootFolder,
 		private WebDavClient $webDavClient,
@@ -138,6 +150,9 @@ class TransferService {
 			if ($chunk === false || $chunk === '') {
 				break;
 			}
+			if ($bytesRead === 0) {
+				$this->assertNotRawEncrypted($file, $chunk);
+			}
 			hash_update($ctx, $chunk);
 			fwrite($buffer, $chunk);
 			$bytesRead += strlen($chunk);
@@ -222,6 +237,9 @@ class TransferService {
 				if ($data === false || $data === '') {
 					break;
 				}
+				if ($chunkIndex === 0 && $read === 0) {
+					$this->assertNotRawEncrypted($file, $data);
+				}
 				hash_update($ctx, $data);
 				fwrite($buffer, $data);
 				$read += strlen($data);
@@ -259,6 +277,39 @@ class TransferService {
 	}
 
 	/**
+	 * Detects Nextcloud's own server-side encryption header
+	 * (`\OC\Encryption\Util::HEADER_START` = "HBEGIN:", followed by the
+	 * "oc_encryption_module" key - see parseRawHeader()) at the very start
+	 * of a file's content as read via the standard Files API. A properly
+	 * decrypted file's real content should never coincidentally start with
+	 * this exact literal marker, so its presence means Nextcloud's
+	 * decrypt-on-read storage wrapper did NOT decrypt this file for us -
+	 * almost always because the encryption app has since been disabled or
+	 * uninstalled on the source instance (files encrypted while it was
+	 * enabled are NOT automatically decrypted when it's turned back off;
+	 * that requires an explicit `occ encryption:decrypt-all` first) or the
+	 * reading user's encryption keys aren't available. What we'd otherwise
+	 * upload is raw ciphertext, not the file's real content - migrating it
+	 * anyway would silently produce an unreadable/corrupt file on the
+	 * target with no warning, which is worse than a loud, specific
+	 * failure explaining exactly what to fix.
+	 *
+	 * @throws TransferException not retryable - this needs a source-side
+	 *         admin action, not another attempt within this run
+	 */
+	private function assertNotRawEncrypted(MigrationFile $file, string $chunkStart): void {
+		if (!str_starts_with($chunkStart, self::ENCRYPTION_HEADER_MARKER)) {
+			return;
+		}
+
+		throw new TransferException(
+			"Source file '{$file->getSourcePath()}' is still server-side encrypted on the source instance and could not be decrypted for migration (Nextcloud's own encryption header was found in its raw content). "
+			. "Re-enable the encryption app and run 'occ encryption:decrypt-all' on the source instance to decrypt it first, then retry this file.",
+			false,
+		);
+	}
+
+	/**
 	 * Guards against uploading a "torn read": if the source file was
 	 * modified while we were reading it, the bytes we just hashed may not
 	 * correspond to any single consistent version of the file. Mirrors the
@@ -277,31 +328,29 @@ class TransferService {
 	 *    but the actual byte count still disagrees: the file itself never
 	 *    changed, its cached filecache `size` metadata is simply wrong
 	 *    (observed in practice on old files, real-on-disk content LARGER
-	 *    than the DB's cached size - a historical Nextcloud client/server
-	 *    sync bug's residue, not something happening right now). When
+	 *    than the DB's cached size - most commonly a leftover from
+	 *    Nextcloud's own server-side encryption having been enabled at
+	 *    some point in the past: encrypted files are physically LARGER on
+	 *    disk than their logical/decrypted size, since Nextcloud tracks
+	 *    that separately as `unencrypted_size`, which can go stale). When
 	 *    $fullReadGuaranteed is true (the caller read all the way to the
 	 *    stream's real EOF, not just until some pre-computed byte count),
 	 *    there's nothing to retry: we already have the file's complete,
 	 *    real, current content in hand, and the caller declares the actual
 	 *    $bytesRead (not the stale $preSize) to the target - so this is
-	 *    just logged for visibility rather than treated as a failure, and
-	 *    the source's own filecache entry is corrected too (via the public
-	 *    `IStorage::getCache()`/`ICache::update()` OCP APIs, both
-	 *    @since 9.0.0 - a direct, targeted correction, no full rescan
-	 *    needed since the correct size is already known) so the underlying
-	 *    data-quality issue doesn't linger there either. Previously this
-	 *    case was treated the same as a live edit and aborted too, even
-	 *    though declaring the wrong (stale) size to the target risked a
-	 *    Content-Length/body mismatch that a reverse proxy/WAF in front of
-	 *    the target could reject outright with a generic, unhelpful error
-	 *    (e.g. a bare "400 Bad Request" page with no Nextcloud-side detail
-	 *    at all, identical across every affected file). When
-	 *    $fullReadGuaranteed is false (the chunked path, whose loop reads
-	 *    only up to a total derived from the SAME possibly-stale $preSize
-	 *    rather than the stream's real EOF - so a real file LARGER than
-	 *    $preSize would otherwise be silently truncated rather than ever
-	 *    producing a mismatch here), a disagreement is still treated as
-	 *    risky and retried.
+	 *    just logged for visibility rather than treated as a failure.
+	 *    Previously this case was treated the same as a live edit and
+	 *    aborted too, even though declaring the wrong (stale) size to the
+	 *    target risked a Content-Length/body mismatch that a reverse
+	 *    proxy/WAF in front of the target could reject outright with a
+	 *    generic, unhelpful error (e.g. a bare "400 Bad Request" page with
+	 *    no Nextcloud-side detail at all, identical across every affected
+	 *    file). When $fullReadGuaranteed is false (the chunked path, whose
+	 *    loop reads only up to a total derived from the SAME possibly-stale
+	 *    $preSize rather than the stream's real EOF - so a real file
+	 *    LARGER than $preSize would otherwise be silently truncated rather
+	 *    than ever producing a mismatch here), a disagreement is still
+	 *    treated as risky and retried.
 	 *
 	 * Chunk-level resume assumes byte-stable content across attempts, so on
 	 * a genuine live edit we also invalidate any in-progress chunked-upload
@@ -337,12 +386,13 @@ class TransferService {
 				// error, just worth a record. We already have the file's
 				// complete, current content (read to real EOF) and the
 				// caller declares $bytesRead (not $preSize) to the target,
-				// so there's nothing more to do to make THIS transfer
-				// correct. Also correct the source's own filecache entry so
-				// the underlying data-quality issue doesn't linger there
-				// either (a fully public OCP API - IStorage::getCache() and
-				// ICache::update() are both @since 9.0.0 - no full rescan
-				// needed since we already know the correct size).
+				// so there's nothing more to do here. (Not auto-corrected
+				// in the filecache: for an ENCRYPTED file the correct
+				// column for this would be `unencrypted_size`, not `size`
+				// - `size` is meant to reflect the larger, physical
+				// on-disk/ciphertext footprint - and we can't reliably
+				// tell which case we're in from here, so it's safer to
+				// just log it than risk writing to the wrong column.)
 				$this->eventLogger->log(
 					$file->getRunId(),
 					'source_size_metadata_stale',
@@ -351,21 +401,6 @@ class TransferService {
 					$file->getId(),
 					['preSize' => $preSize, 'bytesRead' => $bytesRead],
 				);
-
-				try {
-					$fresh->getStorage()->getCache()->update($fresh->getId(), ['size' => $bytesRead]);
-				} catch (\Throwable $e) {
-					// Best-effort only - never let a filecache-correction
-					// failure block the actual transfer, which already has
-					// everything it needs regardless of whether this succeeds.
-					$this->eventLogger->log(
-						$file->getRunId(),
-						'source_size_metadata_fix_failed',
-						"Could not correct source filecache size for '{$file->getSourcePath()}': " . $e->getMessage(),
-						'debug',
-						$file->getId(),
-					);
-				}
 
 				return;
 			}
