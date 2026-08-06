@@ -1,0 +1,265 @@
+name: Build and publish Nextcloud release
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+env:
+  APP_ID: nextcloud_migrate
+
+jobs:
+  build:
+    name: Build and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@afefcaf556d98dc7896cca380e181decb609ca44
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Set up Node.js
+        uses: actions/setup-node@e51e5fe84fc33b4c73ebe40526b2694712b5b858
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Determine supported Nextcloud release branch
+        run: |
+          set -euo pipefail
+
+          nextcloud_max_version="$(sed -n 's:.*<nextcloud[^>]*max-version="\([0-9][0-9]*\)".*:\1:p' appinfo/info.xml | head -n1)"
+
+          if [ -z "$nextcloud_max_version" ]; then
+            echo "Unable to determine the supported Nextcloud max-version from appinfo/info.xml." >&2
+            exit 1
+          fi
+
+          echo "NEXTCLOUD_VERSION=stable${nextcloud_max_version}" >> "$GITHUB_ENV"
+
+      - name: Set up Nextcloud server
+        uses: SMillerDev/nextcloud-actions/setup-nextcloud@a1964c2cf903781e17b965a0938a70c694379c42
+        with:
+          cron: false
+          version: ${{ env.NEXTCLOUD_VERSION }}
+          database-type: sqlite
+
+      - name: Validate release version metadata
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          release_version="${RELEASE_TAG#v}"
+          app_version="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' appinfo/info.xml | head -n1)"
+          package_version="$(node -p "require('./package.json').version")"
+          app_id="$(sed -n 's:.*<id>\(.*\)</id>.*:\1:p' appinfo/info.xml | head -n1)"
+
+          test -n "$release_version"
+          test -n "$app_version"
+          test -n "$package_version"
+          test -n "$app_id"
+
+          if [ "$app_id" != "$APP_ID" ]; then
+            echo "APP_ID ($APP_ID) does not match appinfo/info.xml id ($app_id)." >&2
+            exit 1
+          fi
+
+          if [ "$release_version" != "$app_version" ]; then
+            echo "Release tag version ($release_version) does not match appinfo/info.xml version ($app_version)." >&2
+            exit 1
+          fi
+
+          if [ "$release_version" != "$package_version" ]; then
+            echo "Release tag version ($release_version) does not match package.json version ($package_version)." >&2
+            exit 1
+          fi
+
+      - name: Install development dependencies
+        run: |
+          composer install --no-interaction --no-progress --prefer-dist
+          npm ci
+
+      - name: Validate PHP
+        run: |
+          composer lint
+          composer test
+
+      - name: Build frontend bundle
+        run: npm run build
+
+      - name: Assemble unsigned release archive
+        run: |
+          set -euo pipefail
+
+          build_root="$RUNNER_TEMP/appstore"
+          release_dir="$build_root/$APP_ID"
+          archive_path="$RUNNER_TEMP/${APP_ID}.tar.gz"
+
+          rm -rf "$build_root" "$archive_path"
+          mkdir -p "$release_dir"
+
+          rsync -a --exclude-from="$GITHUB_WORKSPACE/.distignore" "$GITHUB_WORKSPACE/" "$release_dir/"
+
+          composer install \
+            --working-dir="$release_dir" \
+            --no-dev \
+            --no-interaction \
+            --no-progress \
+            --prefer-dist \
+            --optimize-autoloader
+
+          rm -f \
+            "$release_dir/composer.json" \
+            "$release_dir/composer.lock"
+
+          tar -czf "$archive_path" -C "$build_root" "$APP_ID"
+
+      - name: Upload unsigned app tarball as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.APP_ID }}
+          path: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
+          retention-days: 7
+
+  publish_unsigned:
+    name: Publish unsigned release to GitHub
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download unsigned app tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.APP_ID }}
+          path: ${{ runner.temp }}
+
+      - name: Publish unsigned pre-release to GitHub
+        uses: svenstaro/upload-release-action@483c1e56f95e88835747b1c7c60581215016cbf2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
+          asset_name: ${{ env.APP_ID }}.tar.gz
+          tag: main-${{ github.sha }}
+          release_name: "Development build (${{ github.sha }})"
+          prerelease: true
+          overwrite: true
+
+  sign_and_publish:
+    name: Sign and publish to Nextcloud App Store
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'release'
+    environment: release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@afefcaf556d98dc7896cca380e181decb609ca44
+        with:
+          php-version: "8.3"
+          coverage: none
+
+      - name: Determine supported Nextcloud release branch
+        run: |
+          set -euo pipefail
+
+          nextcloud_max_version="$(sed -n 's:.*<nextcloud[^>]*max-version="\([0-9][0-9]*\)".*:\1:p' appinfo/info.xml | head -n1)"
+
+          if [ -z "$nextcloud_max_version" ]; then
+            echo "Unable to determine the supported Nextcloud max-version from appinfo/info.xml." >&2
+            exit 1
+          fi
+
+          echo "NEXTCLOUD_VERSION=stable${nextcloud_max_version}" >> "$GITHUB_ENV"
+
+      - name: Set up Nextcloud server
+        uses: SMillerDev/nextcloud-actions/setup-nextcloud@a1964c2cf903781e17b965a0938a70c694379c42
+        with:
+          cron: false
+          version: ${{ env.NEXTCLOUD_VERSION }}
+          database-type: sqlite
+
+      - name: Download unsigned app tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.APP_ID }}
+          path: ${{ runner.temp }}
+
+      - name: Extract unsigned archive
+        run: |
+          set -euo pipefail
+
+          build_root="$RUNNER_TEMP/appstore"
+          rm -rf "$build_root"
+          mkdir -p "$build_root"
+          tar -xzf "$RUNNER_TEMP/${APP_ID}.tar.gz" -C "$build_root"
+
+      - name: Prepare signing certificate files
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          APP_PUBLIC_CRT: ${{ secrets.APP_PUBLIC_CRT }}
+        run: |
+          set -euo pipefail
+
+          cert_dir="$HOME/.nextcloud/certificates"
+          mkdir -p "$cert_dir"
+          printf '%s' "$APP_PRIVATE_KEY" > "$cert_dir/${APP_ID}.key"
+          printf '%s' "$APP_PUBLIC_CRT" > "$cert_dir/${APP_ID}.crt"
+          chmod 600 "$cert_dir/${APP_ID}.key" "$cert_dir/${APP_ID}.crt"
+
+      - name: Sign and repackage release archive
+        run: |
+          set -euo pipefail
+
+          build_root="$RUNNER_TEMP/appstore"
+          release_dir="$build_root/$APP_ID"
+          archive_path="$RUNNER_TEMP/${APP_ID}.tar.gz"
+
+          rm -f "$release_dir/appinfo/signature.json"
+
+          php "$GITHUB_WORKSPACE/../server/occ" integrity:sign-app \
+            --privateKey="$HOME/.nextcloud/certificates/${APP_ID}.key" \
+            --certificate="$HOME/.nextcloud/certificates/${APP_ID}.crt" \
+            --path="$release_dir"
+
+          rm -f "$archive_path"
+          tar -czf "$archive_path" -C "$build_root" "$APP_ID"
+
+      - name: Upload signed app tarball to GitHub release
+        id: upload_release_asset
+        uses: svenstaro/upload-release-action@483c1e56f95e88835747b1c7c60581215016cbf2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
+          asset_name: ${{ env.APP_ID }}.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
+
+      - name: Publish to Nextcloud App Store
+        uses: R0Wi/nextcloud-appstore-push-action@669734a3b4fb1ff7a636ae6d5bf2c18fab10a4e0
+        with:
+          app_name: ${{ env.APP_ID }}
+          appstore_token: ${{ secrets.APPSTORE_TOKEN }}
+          download_url: ${{ steps.upload_release_asset.outputs.browser_download_url }}
+          app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+          nightly: false
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$HOME/.nextcloud/certificates/${APP_ID}.key" "$HOME/.nextcloud/certificates/${APP_ID}.crt"

@@ -1,0 +1,14 @@
+.env
+.env.*
+.distignore
+.git
+.github
+.gitignore
+node_modules
+package-lock.json
+package.json
+phpunit.xml.dist
+src
+tests
+vendor
+webpack.config.js
