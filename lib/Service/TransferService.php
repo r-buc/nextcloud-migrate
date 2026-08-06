@@ -146,7 +146,7 @@ class TransferService {
 		$sha256 = hash_final($ctx);
 		rewind($buffer);
 
-		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesRead);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesRead, true);
 
 		$this->webDavClient->putFile(
 			$instance,
@@ -240,7 +240,7 @@ class TransferService {
 		}
 		fclose($source);
 
-		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesAccounted);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesAccounted, false);
 
 		$sha256 = hash_final($ctx);
 		$this->webDavClient->assembleChunkedUpload(
@@ -267,30 +267,51 @@ class TransferService {
 	 * cache stale metadata) so this reflects the true current state.
 	 *
 	 * Also compares the number of bytes actually read/buffered against the
-	 * pre-read reported size: previously the declared upload/Content-Length
-	 * was always the pre-read `getSize()` value, even when the storage
-	 * backend's actual readable content came up short (or long) with
-	 * mtime/size metadata reporting completely unchanged before AND after -
-	 * i.e. not a genuine concurrent edit at all. Declaring a Content-Length
-	 * that doesn't match what's actually sent breaks HTTP framing for any
-	 * reverse proxy/WAF in front of the target, which can reject the request
-	 * outright with a generic, unhelpful error (e.g. a bare "400 Bad
-	 * Request" page with no Nextcloud-side detail at all) - so this is
-	 * caught here explicitly instead, with a specific, actionable message
-	 * pointing at the source file rather than a confusing transport-level
-	 * failure. If this keeps recurring for the same file across manual
-	 * retries, that's a strong signal the source file itself is
-	 * inconsistent/corrupted on this instance's storage backend, not a
-	 * transient blip.
+	 * pre-read reported size. These are handled differently depending on
+	 * WHY they disagree:
+	 *  - mtime or a fresh stat's size actually changed: a genuine
+	 *    concurrent edit, so the bytes we just read may not correspond to
+	 *    any single consistent version of the file - abort and retry so
+	 *    the next attempt reads a stable version.
+	 *  - mtime/stat-size are unchanged (both before AND after the read)
+	 *    but the actual byte count still disagrees: the file itself never
+	 *    changed, its cached filecache `size` metadata is simply wrong
+	 *    (observed in practice on old files, real-on-disk content LARGER
+	 *    than the DB's cached size - a historical Nextcloud client/server
+	 *    sync bug's residue, not something happening right now). When
+	 *    $fullReadGuaranteed is true (the caller read all the way to the
+	 *    stream's real EOF, not just until some pre-computed byte count),
+	 *    there's nothing to retry: we already have the file's complete,
+	 *    real, current content in hand, and the caller declares the actual
+	 *    $bytesRead (not the stale $preSize) to the target - so this is
+	 *    just logged for visibility rather than treated as a failure, and
+	 *    the source's own filecache entry is corrected too (via the public
+	 *    `IStorage::getCache()`/`ICache::update()` OCP APIs, both
+	 *    @since 9.0.0 - a direct, targeted correction, no full rescan
+	 *    needed since the correct size is already known) so the underlying
+	 *    data-quality issue doesn't linger there either. Previously this
+	 *    case was treated the same as a live edit and aborted too, even
+	 *    though declaring the wrong (stale) size to the target risked a
+	 *    Content-Length/body mismatch that a reverse proxy/WAF in front of
+	 *    the target could reject outright with a generic, unhelpful error
+	 *    (e.g. a bare "400 Bad Request" page with no Nextcloud-side detail
+	 *    at all, identical across every affected file). When
+	 *    $fullReadGuaranteed is false (the chunked path, whose loop reads
+	 *    only up to a total derived from the SAME possibly-stale $preSize
+	 *    rather than the stream's real EOF - so a real file LARGER than
+	 *    $preSize would otherwise be silently truncated rather than ever
+	 *    producing a mismatch here), a disagreement is still treated as
+	 *    risky and retried.
 	 *
 	 * Chunk-level resume assumes byte-stable content across attempts, so on
-	 * drift we also invalidate any in-progress chunked-upload session
-	 * (abort the staging collection + clear transferId/nextChunkIndex)
-	 * rather than letting a future retry "resume" over content that no
-	 * longer matches what was already uploaded.
+	 * a genuine live edit we also invalidate any in-progress chunked-upload
+	 * session (abort the staging collection + clear
+	 * transferId/nextChunkIndex) rather than letting a future retry
+	 * "resume" over content that no longer matches what was already
+	 * uploaded.
 	 *
-	 * @throws TransferException retryable - the next attempt will read
-	 *         whatever the (hopefully now stable) latest version is
+	 * @throws TransferException retryable - not thrown for a stale-cached-
+	 *         size mismatch when $fullReadGuaranteed is true
 	 */
 	private function assertNotChangedDuringRead(
 		MigrationFile $file,
@@ -301,21 +322,59 @@ class TransferService {
 		int $preMtime,
 		int $preSize,
 		int $bytesRead,
+		bool $fullReadGuaranteed,
 	): void {
 		$fresh = $this->rootFolder->getUserFolder($sourceUserId)->get($file->getSourcePath());
-		if ($fresh->getMTime() === $preMtime && $fresh->getSize() === $preSize && $bytesRead === $preSize) {
-			return;
-		}
+		$metadataChanged = $fresh->getMTime() !== $preMtime || $fresh->getSize() !== $preSize;
 
-		$metadataUnchanged = $fresh->getMTime() === $preMtime && $fresh->getSize() === $preSize;
-		$reason = $metadataUnchanged
-			? "reported unchanged metadata (size {$preSize}) but only {$bytesRead} byte(s) could actually be read - the source file may be corrupted/inconsistent on this instance's storage backend"
-			: 'changed while being read';
+		if (!$metadataChanged) {
+			if ($bytesRead === $preSize) {
+				return;
+			}
+
+			if ($fullReadGuaranteed) {
+				// Stale cached size on an otherwise-unchanged file: not an
+				// error, just worth a record. We already have the file's
+				// complete, current content (read to real EOF) and the
+				// caller declares $bytesRead (not $preSize) to the target,
+				// so there's nothing more to do to make THIS transfer
+				// correct. Also correct the source's own filecache entry so
+				// the underlying data-quality issue doesn't linger there
+				// either (a fully public OCP API - IStorage::getCache() and
+				// ICache::update() are both @since 9.0.0 - no full rescan
+				// needed since we already know the correct size).
+				$this->eventLogger->log(
+					$file->getRunId(),
+					'source_size_metadata_stale',
+					"Source file '{$file->getSourcePath()}' has stale cached size metadata (reported {$preSize}, actually {$bytesRead} byte(s)); uploading the actual content",
+					'info',
+					$file->getId(),
+					['preSize' => $preSize, 'bytesRead' => $bytesRead],
+				);
+
+				try {
+					$fresh->getStorage()->getCache()->update($fresh->getId(), ['size' => $bytesRead]);
+				} catch (\Throwable $e) {
+					// Best-effort only - never let a filecache-correction
+					// failure block the actual transfer, which already has
+					// everything it needs regardless of whether this succeeds.
+					$this->eventLogger->log(
+						$file->getRunId(),
+						'source_size_metadata_fix_failed',
+						"Could not correct source filecache size for '{$file->getSourcePath()}': " . $e->getMessage(),
+						'debug',
+						$file->getId(),
+					);
+				}
+
+				return;
+			}
+		}
 
 		$this->eventLogger->log(
 			$file->getRunId(),
 			'source_drift_detected',
-			"Source file '{$file->getSourcePath()}' {$reason}; retrying",
+			"Source file '{$file->getSourcePath()}' changed while being read; retrying",
 			'warning',
 			$file->getId(),
 			['preMtime' => $preMtime, 'preSize' => $preSize, 'postMtime' => $fresh->getMTime(), 'postSize' => $fresh->getSize(), 'bytesRead' => $bytesRead],
@@ -328,7 +387,7 @@ class TransferService {
 			$file->setBytesTransferred(0);
 		}
 
-		throw new TransferException("Source file '{$file->getSourcePath()}' {$reason}", true);
+		throw new TransferException("Source file '{$file->getSourcePath()}' changed while being read", true);
 	}
 
 	/**

@@ -46,19 +46,25 @@ ACLs.
 - **Stale source filecache metadata**: the torn-read guard above also
   compares the number of bytes *actually read* against the file's reported
   `getSize()` - even when mtime/size report completely unchanged before
-  and after the read. Without this, a file whose filecache `size` column
-  doesn't match its real readable content (seen in practice on old files,
-  years-old data possibly left inconsistent by a historical Nextcloud
-  client/server sync bug) would have a WRONG Content-Length declared to
-  the target; a reverse proxy/WAF in front of the target instance can then
-  reject the request outright with a generic, unhelpful error (e.g. a bare
-  "400 Bad Request" HTML page with no Nextcloud-side detail at all,
-  identical across every affected file regardless of path/size/type).
-  `TransferService::assertNotChangedDuringRead()` catches this and reports
-  it as a specific, actionable "source file may be corrupted/inconsistent"
-  failure instead. If a file keeps failing this way even after a manual
-  retry, try `occ files:scan --path="/<user>/files/<relative path>"` on
-  the SOURCE instance to refresh its filecache entry before retrying again.
+  and after the read. A file whose filecache `size` column doesn't match
+  its real readable content (seen in practice on old files, years-old data
+  left inconsistent by a historical Nextcloud client/server sync bug) would
+  otherwise get a WRONG Content-Length declared to the target; a reverse
+  proxy/WAF in front of the target instance can then reject the request
+  outright with a generic, unhelpful error (e.g. a bare "400 Bad Request"
+  HTML page with no Nextcloud-side detail at all, identical across every
+  affected file regardless of path/size/type). For a single (non-chunked)
+  PUT, the read always continues to the stream's real EOF regardless of
+  the declared size, so there's no risk of a truncated upload here: the
+  mismatch is simply logged (not treated as a failure) and the upload
+  proceeds using the actual byte count. As a side effect,
+  `TransferService` also corrects the source's own stale filecache entry
+  via the public `IStorage::getCache()`/`ICache::update()` OCP APIs, since
+  the correct size is already known - no full rescan needed. Chunked
+  (large-file) transfers keep the stricter abort-and-retry behavior for
+  this same mismatch, since their upload loop is itself sized off the
+  (possibly stale) reported size rather than the stream's real EOF, so a
+  real file *larger* than reported would otherwise be silently truncated.
 - **Orchestration**: entirely native Nextcloud background jobs (no
   Redis/external queue). One self-perpetuating `TransferWorkerJob` (then
   one `VerifyWorkerJob`) lineage per mapped user, each processing many
