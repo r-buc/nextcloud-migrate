@@ -98,16 +98,28 @@ ACLs.
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the
   latest/current run. A run can still cover many mapped users at once.
-- **Admin UI**: a "Quick migration" panel (Start/Cancel only) picks users,
-  creates the run, and drives it hands-off - the frontend automatically
-  calls the dry-run endpoint once the run is `CREATED` and the approve
-  endpoint once it reaches `DRY_RUN_READY` (see `maybeAutoAdvance()` in
-  `js/admin.js`), polling `GET .../status` every few seconds for a live
-  progress bar and a per-user files/bytes table. This is purely a frontend
-  convenience - the backend endpoints/state machine are unchanged, so the
-  older "Migration run (manual/advanced)" panel below it (kept during this
-  UI's testing period) can still drive every stage by hand. Per-user
-  transferred/total byte counts are computed live in `StatusController`
+- **Admin UI**: a Vue 3 app (`src/`, built with `@nextcloud/vue` components -
+  `NcButton`, `NcTextField`, `NcCheckboxRadioSwitch`, `NcNoteCard`,
+  `NcProgressBar` - the same library and components Nextcloud's own Settings
+  app uses, e.g. for the Users page's quota bar) replacing the old
+  hand-written HTML/vanilla-JS admin page. `templates/settings/admin.php`
+  is now just a mount point (`<div id="nextcloud-migrate-admin-app">`);
+  `src/main.js` mounts `App.vue`, which composes `InstanceSettings.vue`
+  (target instance form) and `MigrationPanel.vue` (create-run form plus
+  live progress view, both in one component with an "Advanced
+  options"/"Advanced controls" disclosure instead of a separate duplicate
+  panel). The frontend drives the run hands-off by default - it
+  automatically calls the dry-run endpoint once a run is `CREATED` and the
+  approve endpoint once it reaches `DRY_RUN_READY` (see `maybeAutoAdvance()`
+  in `MigrationPanel.vue`), polling `GET .../status` every few seconds for
+  a live `NcProgressBar` and a per-user files/bytes table (each row's
+  Volume column is itself an `NcProgressBar`, mirroring the Users page's
+  quota column). The advanced disclosure exposes expert mode, skip
+  verification, manual dry-run/approve/pause/resume/refresh buttons, and a
+  raw status JSON dump for the same hands-on testing/debugging the old
+  panel offered - this is purely a frontend concern, the backend
+  endpoints/state machine are unchanged. Per-user transferred/total byte
+  counts are computed live in `StatusController`
   (`MigrationFileMapper::statsByUser()`), not from `UserMap`'s own
   `totalFiles`/`transferredFiles` columns, which are only ever set once at
   discovery time.
@@ -184,3 +196,37 @@ OCP base classes/interfaces needed to load the real production classes
 composer install
 composer test
 ```
+
+## Frontend build
+
+The admin settings page is a Vue 3 app (`src/`) built with webpack via
+`@nextcloud/webpack-vue-config`. Vue 3 (not NC28-core's own Vue 2) was
+chosen deliberately: each app bundles its own isolated Vue instance (no
+runtime shared with core), and the installed `@nextcloud/vue@9.9.0`'s
+components (`NcTextField`, `NcButton`, etc.) are themselves written with
+Vue-3-only Composition API features (`<script setup>`, `defineModel`) - so
+despite `@nextcloud/vue`'s peer dependency nominally allowing Vue 2.7,
+Vue 3 is the only version this specific component version is actually
+built against. `vendor/` and the built `js/*.js` bundle
+are both gitignored (not committed) - like `vendor/`, they must be
+generated locally before the app will actually load in a real Nextcloud
+instance, and regenerated after any `src/` change:
+
+```bash
+npm install
+npm run build   # emits js/nextcloud_migrate-main.js (+ .map/.LICENSE.txt)
+```
+
+`lib/Settings/AdminSettings.php` loads it via
+`Util::addScript('nextcloud_migrate', 'nextcloud_migrate-main')`. The
+second argument must be the built file's full basename (including the
+`{appId}-` prefix `@nextcloud/webpack-vue-config` always bakes into
+`output.filename`), not just the webpack entry name (`main`) - passing
+`'main'` looks for a nonexistent `js/main.js` and silently fails to load
+any script at all (logged to `nextcloud.log` as `app: jsresourceloader,
+"Could not find resource ... /js/main.js"`, no visible error otherwise).
+See `JSResourceLocator::doFind()` in Nextcloud core for the exact fallback
+file-lookup order this depends on. Component styles are plain
+Vue SFC `<style scoped>` blocks bundled inline via `style-loader` (injected
+at runtime), so there is no separate CSS file/`addStyle()` call to keep in
+sync.

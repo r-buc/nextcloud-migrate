@@ -1,0 +1,37 @@
+{
+  "name": "nextcloud_migrate",
+  "version": "0.1.0",
+  "description": "Migrate a user's files 1:1 to a remote Nextcloud instance",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "build": "webpack --node-env production",
+    "dev": "webpack --node-env development",
+    "watch": "webpack --node-env development --watch"
+  },
+  "dependencies": {
+    "@nextcloud/axios": "^2.5.1",
+    "@nextcloud/router": "^3.0.1",
+    "@nextcloud/vue": "^9.9.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@nextcloud/webpack-vue-config": "^7.0.2",
+    "babel-loader": "^10.0.0",
+    "css-loader": "^7.1.1",
+    "node-polyfill-webpack-plugin": "4.0.0",
+    "sass": "^1.64.2",
+    "sass-loader": "^16.0.2",
+    "style-loader": "^4.0.0",
+    "terser-webpack-plugin": "^5.3.10",
+    "ts-loader": "^9.4.4",
+    "vue-loader": "^17.4.2",
+    "webpack": "^5.88.2",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.0.2"
+  },
+  "engines": {
+    "node": "^20.11.0 || ^22 || ^24"
+  }
+}
