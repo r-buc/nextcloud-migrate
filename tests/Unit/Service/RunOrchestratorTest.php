@@ -264,4 +264,78 @@ final class RunOrchestratorTest extends TestCase {
 
 		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
 	}
+
+	public function testReconcileStalledRunsAdvancesTransferringRunWithNoRemainingWork(): void {
+		// Simulates a run left wedged in TRANSFERRING because its last
+		// worker lineage finished without ever calling
+		// onUserTransferComplete() (e.g. a crash, or a run that stalled
+		// under since-fixed logic before this reconciliation existed).
+		// CleanupLocksJob's periodic sweep should notice nothing is left
+		// and advance it on its own, without needing a manual pause/resume.
+		$run = $this->makeRun(MigrationRun::STATE_TRANSFERRING);
+		$run->setSkipVerification(true);
+		$this->runMapper->method('find')->willReturn($run);
+		$this->runMapper->method('findActive')->willReturn([$run]);
+
+		$userMap = new UserMap();
+		$userMap->setId(9);
+		$userMap->setState(UserMap::STATE_ACTIVE);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMap]);
+
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_TRANSFERRED => 2223,
+		]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(FinalizeJob::class, ['runId' => 42], 0);
+
+		$this->orchestrator->reconcileStalledRuns();
+
+		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
+	}
+
+	public function testReconcileStalledRunsLeavesTransferringRunAloneWhileWorkRemains(): void {
+		$run = $this->makeRun(MigrationRun::STATE_TRANSFERRING);
+		$this->runMapper->method('find')->willReturn($run);
+		$this->runMapper->method('findActive')->willReturn([$run]);
+
+		$userMap = new UserMap();
+		$userMap->setId(9);
+		$userMap->setState(UserMap::STATE_ACTIVE);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMap]);
+
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_DISCOVERED => 5,
+		]);
+
+		$this->jobList->expects($this->never())->method('add');
+
+		$this->orchestrator->reconcileStalledRuns();
+
+		self::assertSame(MigrationRun::STATE_TRANSFERRING, $run->getState());
+	}
+
+	public function testReconcileStalledRunsAdvancesVerifyingRunWithNoRemainingWork(): void {
+		$run = $this->makeRun(MigrationRun::STATE_VERIFYING);
+		$this->runMapper->method('find')->willReturn($run);
+		$this->runMapper->method('findActive')->willReturn([$run]);
+
+		$userMap = new UserMap();
+		$userMap->setId(9);
+		$userMap->setState(UserMap::STATE_ACTIVE);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMap]);
+
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_VERIFIED => 10,
+		]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(FinalizeJob::class, ['runId' => 42], 0);
+
+		$this->orchestrator->reconcileStalledRuns();
+
+		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
+	}
 }

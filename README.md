@@ -107,6 +107,28 @@ ACLs.
   has genuinely finished, even with some permanent failures left over), and
   exhausted failures count as fully settled (weight 1.0) for progress
   reporting rather than the partial "still in progress" weight.
+- **Stalled-run self-healing**: a run's TRANSFERRING/VERIFYING phase is only
+  ever supposed to end when the LAST remaining per-user worker lineage
+  calls `RunOrchestrator::onUserTransferComplete()`/
+  `onUserVerificationComplete()` - nothing else re-evaluates it afterwards.
+  If a worker crashed hard enough to never make that call (or a run got
+  stuck under since-fixed phase-advancement logic), it would otherwise stay
+  wedged forever with no active jobs left and no way to notice on its own.
+  `CleanupLocksJob` (already a periodic sweep, see below) also calls
+  `RunOrchestrator::reconcileStalledRuns()` every run: it re-checks every
+  currently TRANSFERRING/VERIFYING run and advances it if nothing is
+  actually remaining, so such a run recovers within one sweep interval
+  (default 5 minutes) instead of needing a manual pause/resume.
+- **Failure logging**: every terminal per-file failure (`mapping_failed`,
+  and exhausted `transfer_failed`/`verification_failed`) is recorded via
+  `EventLogger` - durably in the `migrate_events` table (queryable via
+  `GET .../events` and `GET .../failures`, and surfaced in the admin UI's
+  "Show failed files" list alongside each file's `lastError`), but NOT
+  mirrored to the Nextcloud server log: `EventLogger` only mirrors
+  RUN-level events there, since per-file events are already fully durable/
+  queryable in the app's own DB and mirroring every one would just add
+  noise to the server log at migration scale. Transient (still-retryable)
+  failures are logged too, at `debug` severity.
 - **v1 simplification**: one target instance and one current run per admin
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the

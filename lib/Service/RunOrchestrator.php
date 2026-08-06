@@ -385,6 +385,30 @@ class RunOrchestrator {
 		$this->jobList->add(FinalizeJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 	}
 
+	/**
+	 * Periodic self-healing check (called by CleanupLocksJob, alongside its
+	 * stale-lock sweep): a run's TRANSFERRING/VERIFYING phase is only ever
+	 * supposed to end when the LAST remaining worker lineage calls
+	 * onUserTransferComplete()/onUserVerificationComplete() - but nothing
+	 * else ever re-evaluates a run afterwards. If a worker crashed hard
+	 * enough to never make that call, or the run got stuck under
+	 * since-fixed phase-advancement logic, it would otherwise stay wedged
+	 * in TRANSFERRING/VERIFYING forever with no active jobs left and no way
+	 * to notice on its own. This re-checks every currently
+	 * TRANSFERRING/VERIFYING run and nudges it along if it turns out
+	 * nothing is actually remaining, so such a run recovers within one
+	 * sweep interval instead of needing a manual pause/resume.
+	 */
+	public function reconcileStalledRuns(): void {
+		foreach ($this->runMapper->findActive() as $run) {
+			if ($run->getState() === MigrationRun::STATE_TRANSFERRING && !$this->anyUserStillTransferring($run->getId())) {
+				$this->onTransferPoolIdle($run->getId());
+			} elseif ($run->getState() === MigrationRun::STATE_VERIFYING && !$this->anyUserStillVerifying($run->getId())) {
+				$this->onVerificationPoolIdle($run->getId());
+			}
+		}
+	}
+
 	public function finalizeRun(int $runId): void {
 		$run = $this->runMapper->find($runId);
 		$counts = $this->fileMapper->countByState($runId);

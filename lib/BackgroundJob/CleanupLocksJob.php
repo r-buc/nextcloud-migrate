@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\NextcloudMigrate\BackgroundJob;
 
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
+use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\BackgroundJob\TimedJob;
 use Psr\Log\LoggerInterface;
@@ -15,6 +16,10 @@ use Psr\Log\LoggerInterface;
  * before it could persist a terminal state. Without this, a crashed worker
  * would leave its claimed row permanently invisible to
  * findTransferable()/findVerifiable(), stalling the run.
+ *
+ * Also runs RunOrchestrator::reconcileStalledRuns() (see its docblock): a
+ * self-healing check for runs left wedged in TRANSFERRING/VERIFYING with no
+ * active worker lineage left and nothing actually remaining to do.
  */
 class CleanupLocksJob extends TimedJob {
 	// How often this sweep runs. Reclaimed rows become eligible again
@@ -25,6 +30,7 @@ class CleanupLocksJob extends TimedJob {
 	public function __construct(
 		ITimeFactory $time,
 		private MigrationFileMapper $fileMapper,
+		private RunOrchestrator $runOrchestrator,
 		private LoggerInterface $logger,
 	) {
 		parent::__construct($time);
@@ -46,6 +52,14 @@ class CleanupLocksJob extends TimedJob {
 
 		if ($reclaimed > 0) {
 			$this->logger->info("Reclaimed {$reclaimed} stale migration file lock(s) from crashed worker(s)", [
+				'app' => 'nextcloud_migrate',
+			]);
+		}
+
+		try {
+			$this->runOrchestrator->reconcileStalledRuns();
+		} catch (\Throwable $e) {
+			$this->logger->debug('CleanupLocksJob could not reconcile stalled runs: ' . $e->getMessage(), [
 				'app' => 'nextcloud_migrate',
 			]);
 		}
