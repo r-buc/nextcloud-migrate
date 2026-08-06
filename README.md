@@ -94,6 +94,19 @@ ACLs.
   `TRANSFERRING` to `FINALIZING` once transfer completes - roughly halves
   total network/IO cost for the run at the expense of that extra safety
   net. Verification is on by default.
+- **Retry exhaustion vs. transient failure**: a file in `transfer_failed`/
+  `verification_failed` is only actually retried while its attempt count is
+  below `MigrationFile::MAX_TRANSFER_ATTEMPTS`/`MAX_VERIFY_ATTEMPTS` - once
+  exhausted it's permanently stuck in that state (`findTransferable()`/
+  `findVerifiable()` will never select it again). Phase-advancement checks
+  (`RunOrchestrator::anyUserStillTransferring()`/`anyUserStillVerifying()`/
+  `resumeRun()`) and `StatusController`'s progress-percent calculation both
+  distinguish the two via `MigrationFileMapper::countRetryableFailures()`:
+  only still-retryable failures count as "remaining work" (so a run isn't
+  stuck in TRANSFERRING/VERIFYING forever once every mapped user's lineage
+  has genuinely finished, even with some permanent failures left over), and
+  exhausted failures count as fully settled (weight 1.0) for progress
+  reporting rather than the partial "still in progress" weight.
 - **v1 simplification**: one target instance and one current run per admin
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the

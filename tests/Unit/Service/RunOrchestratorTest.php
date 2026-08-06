@@ -59,6 +59,14 @@ final class RunOrchestratorTest extends TestCase {
 		// update() just needs to accept a MigrationRun and hand it back.
 		$this->runMapper->method('update')->willReturnArgument(0);
 
+		// Default: no retryable failed rows at all. Individual tests that
+		// care about retryable-vs-exhausted transfer/verification failures
+		// override this with a more specific stub.
+		$this->fileMapper->method('countRetryableFailures')->willReturn([
+			'transferRetryable' => 0,
+			'verificationRetryable' => 0,
+		]);
+
 		$this->orchestrator = new RunOrchestrator(
 			$this->runMapper,
 			$this->instanceMapper,
@@ -197,6 +205,62 @@ final class RunOrchestratorTest extends TestCase {
 			->with(FinalizeJob::class, ['runId' => 42], 0);
 
 		$run = $this->orchestrator->resumeRun(42);
+
+		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
+	}
+
+	public function testResumeRunGoesToFinalizingWhenOnlyExhaustedFailuresRemain(): void {
+		// All 5 transfer_failed rows have exhausted MAX_TRANSFER_ATTEMPTS
+		// (countRetryableFailures reports 0 retryable) - they will never
+		// become transferable again, so they must not keep the run stuck
+		// resuming into TRANSFERRING forever.
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_PAUSED));
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_TRANSFER_FAILED => 5,
+		]);
+		$this->fileMapper->method('countRetryableFailures')->willReturn([
+			'transferRetryable' => 0,
+			'verificationRetryable' => 0,
+		]);
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(FinalizeJob::class, ['runId' => 42], 0);
+
+		$run = $this->orchestrator->resumeRun(42);
+
+		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
+	}
+
+	public function testOnUserTransferCompleteAdvancesRunWhenOnlyExhaustedFailuresRemain(): void {
+		// Mirrors a real-world status snapshot: a user's lineage stopped
+		// (nothing left to claim) with a chunk of permanently-failed files
+		// sitting in transfer_failed. Before the fix, anyUserStillTransferring()
+		// counted every transfer_failed row as "remaining work" regardless
+		// of whether its retries were exhausted, so the run would never
+		// leave TRANSFERRING even though no worker was doing anything more.
+		$run = $this->makeRun(MigrationRun::STATE_TRANSFERRING);
+		$run->setSkipVerification(true);
+		$this->runMapper->method('find')->willReturn($run);
+
+		$userMap = new UserMap();
+		$userMap->setId(9);
+		$userMap->setState(UserMap::STATE_ACTIVE);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMap]);
+
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_TRANSFER_FAILED => 98,
+			MigrationFile::STATE_TRANSFERRED => 2223,
+		]);
+		$this->fileMapper->method('countRetryableFailures')->willReturn([
+			'transferRetryable' => 0,
+			'verificationRetryable' => 0,
+		]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(FinalizeJob::class, ['runId' => 42], 0);
+
+		$this->orchestrator->onUserTransferComplete(42, 9);
 
 		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
 	}

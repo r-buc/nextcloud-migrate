@@ -218,6 +218,51 @@ class MigrationFileMapper extends QBMapper {
 	}
 
 	/**
+	 * Counts of TRANSFER_FAILED/VERIFICATION_FAILED rows that are still
+	 * within their retry budget (transfer_attempts < MAX_TRANSFER_ATTEMPTS /
+	 * verify_attempts < MAX_VERIFY_ATTEMPTS) - i.e. still eligible to be
+	 * picked up again by findTransferable()/findVerifiable(). Rows that
+	 * have exhausted their retry budget are permanently stuck in these
+	 * states and must NOT be treated as "still pending work" (see
+	 * RunOrchestrator::anyUserStillTransferring()/anyUserStillVerifying()/
+	 * resumeRun()) or "still in progress" (see
+	 * StatusController::calculateProgressPercent()) - they will never
+	 * change state again on their own.
+	 *
+	 * @return array{transferRetryable:int, verificationRetryable:int}
+	 * @throws Exception
+	 */
+	public function countRetryableFailures(int $runId, ?int $userMapId = null): array {
+		$transferQb = $this->db->getQueryBuilder();
+		$transferQb->selectAlias($transferQb->createFunction('COUNT(*)'), 'cnt')
+			->from($this->getTableName())
+			->where($transferQb->expr()->eq('run_id', $transferQb->createNamedParameter($runId)))
+			->andWhere($transferQb->expr()->eq('state', $transferQb->createNamedParameter(MigrationFile::STATE_TRANSFER_FAILED)))
+			->andWhere($transferQb->expr()->lt('transfer_attempts', $transferQb->createNamedParameter(MigrationFile::MAX_TRANSFER_ATTEMPTS)));
+		if ($userMapId !== null) {
+			$transferQb->andWhere($transferQb->expr()->eq('user_map_id', $transferQb->createNamedParameter($userMapId)));
+		}
+		$transferResult = $transferQb->executeQuery();
+		$transferRetryable = (int)$transferResult->fetchOne();
+		$transferResult->closeCursor();
+
+		$verifyQb = $this->db->getQueryBuilder();
+		$verifyQb->selectAlias($verifyQb->createFunction('COUNT(*)'), 'cnt')
+			->from($this->getTableName())
+			->where($verifyQb->expr()->eq('run_id', $verifyQb->createNamedParameter($runId)))
+			->andWhere($verifyQb->expr()->eq('state', $verifyQb->createNamedParameter(MigrationFile::STATE_VERIFICATION_FAILED)))
+			->andWhere($verifyQb->expr()->lt('verify_attempts', $verifyQb->createNamedParameter(MigrationFile::MAX_VERIFY_ATTEMPTS)));
+		if ($userMapId !== null) {
+			$verifyQb->andWhere($verifyQb->expr()->eq('user_map_id', $verifyQb->createNamedParameter($userMapId)));
+		}
+		$verifyResult = $verifyQb->executeQuery();
+		$verificationRetryable = (int)$verifyResult->fetchOne();
+		$verifyResult->closeCursor();
+
+		return ['transferRetryable' => $transferRetryable, 'verificationRetryable' => $verificationRetryable];
+	}
+
+	/**
 	 * Sums the size of every non-directory row for a run, regardless of
 	 * state. Used to populate migration_runs.total_bytes once discovery
 	 * completes.

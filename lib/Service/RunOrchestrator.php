@@ -436,9 +436,14 @@ class RunOrchestrator {
 		}
 
 		$counts = $this->fileMapper->countByState($runId);
-		$transferableRemaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0) + ($counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0);
+		// Only STILL-RETRYABLE failed rows count as remaining work here -
+		// see the comment in anyUserStillTransferring()/anyUserStillVerifying()
+		// for why counting exhausted-retry rows would make a run with any
+		// permanent failures resume into the same phase forever.
+		$retryable = $this->fileMapper->countRetryableFailures($runId);
+		$transferableRemaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0) + $retryable['transferRetryable'];
 		$verifiableRemaining = !$run->getSkipVerification()
-			? ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0) + ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
+			? ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0) + $retryable['verificationRetryable']
 			: 0;
 
 		if ($transferableRemaining > 0) {
@@ -543,8 +548,14 @@ class RunOrchestrator {
 				continue;
 			}
 			$counts = $this->fileMapper->countByState($runId, $userMap->getId());
+			// Only STILL-RETRYABLE transfer_failed rows count as remaining
+			// work - ones that have exhausted MAX_TRANSFER_ATTEMPTS are
+			// permanently stuck (findTransferable() will never pick them up
+			// again) and must not block this user's lineage from ever being
+			// considered done.
+			$retryable = $this->fileMapper->countRetryableFailures($runId, $userMap->getId());
 			$remaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0)
-				+ ($counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0)
+				+ $retryable['transferRetryable']
 				+ ($counts[MigrationFile::STATE_TRANSFERRING] ?? 0);
 			if ($remaining > 0) {
 				return true;
@@ -563,8 +574,11 @@ class RunOrchestrator {
 				continue;
 			}
 			$counts = $this->fileMapper->countByState($runId, $userMap->getId());
+			// Same reasoning as anyUserStillTransferring() above, but for
+			// verification_failed rows that have exhausted MAX_VERIFY_ATTEMPTS.
+			$retryable = $this->fileMapper->countRetryableFailures($runId, $userMap->getId());
 			$remaining = ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0)
-				+ ($counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0)
+				+ $retryable['verificationRetryable']
 				+ ($counts[MigrationFile::STATE_VERIFYING] ?? 0);
 			if ($remaining > 0) {
 				return true;

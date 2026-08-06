@@ -85,7 +85,7 @@ class StatusController extends Controller {
 		return new JSONResponse([
 			'run' => $run,
 			'stateCounts' => $counts,
-			'progressPercent' => $this->calculateProgressPercent($run->getTotalFiles(), $counts, $run->getSkipVerification()),
+			'progressPercent' => $this->calculateProgressPercent($runId, $run->getTotalFiles(), $counts, $run->getSkipVerification()),
 			'userMaps' => $userMapsOut,
 		]);
 	}
@@ -99,9 +99,19 @@ class StatusController extends Controller {
 	 * pipeline only has one phase, so TRANSFERRED already counts as fully
 	 * done rather than half-done.
 	 *
+	 * transfer_failed/verification_failed rows are only "still in
+	 * progress" (partial weight) while they remain within their retry
+	 * budget - once MAX_TRANSFER_ATTEMPTS/MAX_VERIFY_ATTEMPTS is exhausted
+	 * they will never change state again (findTransferable()/
+	 * findVerifiable() permanently exclude them), so they must count as
+	 * fully settled (weight 1.0), the same as mapping_failed. Without this,
+	 * a run with a chunk of permanently-failed files can sit well short of
+	 * 100% forever even after every file has reached a terminal state and
+	 * the run has otherwise finished.
+	 *
 	 * @param array<string,int> $counts
 	 */
-	private function calculateProgressPercent(int $totalFiles, array $counts, bool $skipVerification): float {
+	private function calculateProgressPercent(int $runId, int $totalFiles, array $counts, bool $skipVerification): float {
 		if ($totalFiles <= 0) {
 			return 0.0;
 		}
@@ -114,6 +124,9 @@ class StatusController extends Controller {
 				MigrationFile::STATE_TRANSFER_FAILED => 0.5,
 				MigrationFile::STATE_MAPPING_FAILED => 1.0,
 				MigrationFile::STATE_TRANSFERRED => 1.0,
+				MigrationFile::STATE_VERIFYING => 1.0,
+				MigrationFile::STATE_VERIFICATION_FAILED => 1.0,
+				MigrationFile::STATE_VERIFIED => 1.0,
 				MigrationFile::STATE_SKIPPED => 1.0,
 				MigrationFile::STATE_COMPLETED => 1.0,
 			]
@@ -132,8 +145,28 @@ class StatusController extends Controller {
 				MigrationFile::STATE_COMPLETED => 1.0,
 			];
 
+		$retryable = $this->fileMapper->countRetryableFailures($runId);
+		// Rows still within their retry budget keep the partial weight
+		// above; the exhausted remainder is treated as fully settled (1.0)
+		// instead, regardless of phase.
+		$transferFailedTotal = $counts[MigrationFile::STATE_TRANSFER_FAILED] ?? 0;
+		$transferFailedRetryable = min($retryable['transferRetryable'], $transferFailedTotal);
+		$transferFailedExhausted = $transferFailedTotal - $transferFailedRetryable;
+
+		$verificationFailedTotal = $counts[MigrationFile::STATE_VERIFICATION_FAILED] ?? 0;
+		$verificationFailedRetryable = min($retryable['verificationRetryable'], $verificationFailedTotal);
+		$verificationFailedExhausted = $verificationFailedTotal - $verificationFailedRetryable;
+
 		$weighted = 0.0;
 		foreach ($counts as $state => $count) {
+			if ($state === MigrationFile::STATE_TRANSFER_FAILED) {
+				$weighted += ($weights[$state] ?? 0.0) * $transferFailedRetryable + 1.0 * $transferFailedExhausted;
+				continue;
+			}
+			if ($state === MigrationFile::STATE_VERIFICATION_FAILED) {
+				$weighted += ($weights[$state] ?? 0.0) * $verificationFailedRetryable + 1.0 * $verificationFailedExhausted;
+				continue;
+			}
 			$weighted += ($weights[$state] ?? 0.0) * $count;
 		}
 
