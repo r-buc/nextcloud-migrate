@@ -42,7 +42,10 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
  */
 class TransferService {
 	// Exponential backoff schedule applied after each failed attempt,
-	// indexed by (attempt number - 1).
+	// indexed by (attempt number - 1). Currently dormant in practice since
+	// MigrationFile::MAX_TRANSFER_ATTEMPTS = 1 means the very first failure
+	// is already exhausted (see recordFailure() below) - kept in case that
+	// limit is ever raised again.
 	private const BACKOFF_SECONDS = [1, 5, 30, 300];
 
 	public function __construct(

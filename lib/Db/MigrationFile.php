@@ -75,8 +75,19 @@ class MigrationFile extends Entity implements \JsonSerializable {
 	public const STATE_VERIFICATION_FAILED = 'verification_failed';
 	public const STATE_COMPLETED = 'completed';
 
-	public const MAX_TRANSFER_ATTEMPTS = 3;
-	public const MAX_VERIFY_ATTEMPTS = 2;
+	// Automatic in-run retries add exponential backoff delay (see
+	// TransferService::BACKOFF_SECONDS) without much payoff - most
+	// real-world failures (permission/quota/auth issues, a genuinely
+	// missing/unreadable source file) won't resolve themselves seconds
+	// later within the same run, they just delay the run's overall
+	// result. A single attempt still marks the failure immediately as
+	// exhausted/settled (see countRetryableFailures()), so the run isn't
+	// held up waiting on a retry that's unlikely to help; the admin can
+	// still retry any failed file afterwards via the explicit "Retry
+	// failed files" action (RunOrchestrator::retryFailures()), which
+	// resets attempts back to 0 regardless of these limits.
+	public const MAX_TRANSFER_ATTEMPTS = 1;
+	public const MAX_VERIFY_ATTEMPTS = 1;
 
 	// Files at or above this size use the NG chunked upload protocol (same
 	// wire protocol as the official Nextcloud desktop/mobile clients) so a

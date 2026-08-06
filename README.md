@@ -96,9 +96,17 @@ ACLs.
   net. Verification is on by default.
 - **Retry exhaustion vs. transient failure**: a file in `transfer_failed`/
   `verification_failed` is only actually retried while its attempt count is
-  below `MigrationFile::MAX_TRANSFER_ATTEMPTS`/`MAX_VERIFY_ATTEMPTS` - once
-  exhausted it's permanently stuck in that state (`findTransferable()`/
-  `findVerifiable()` will never select it again). Phase-advancement checks
+  below `MigrationFile::MAX_TRANSFER_ATTEMPTS`/`MAX_VERIFY_ATTEMPTS` - both
+  set to **1**, so automatic in-run retries are effectively disabled: a
+  single failed attempt is already exhausted/permanent. Real-world
+  failures (permission/quota/auth issues, a genuinely missing/unreadable
+  source file) rarely resolve themselves a few seconds later within the
+  same run - automatic retries with exponential backoff (`TransferService`'s
+  `BACKOFF_SECONDS`, now dormant) just delayed the run's overall result
+  without much payoff. Once exhausted, a file is permanently stuck in that
+  state until explicitly retried (`findTransferable()`/`findVerifiable()`
+  will never select it again on their own) - see "Retrying failed files"
+  below for the admin-triggered alternative. Phase-advancement checks
   (`RunOrchestrator::anyUserStillTransferring()`/`anyUserStillVerifying()`/
   `resumeRun()`) and `StatusController`'s progress-percent calculation both
   distinguish the two via `MigrationFileMapper::countRetryableFailures()`:
