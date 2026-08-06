@@ -33,6 +33,7 @@ return [
         // Status / reporting
         ['name' => 'status#runStatus', 'url' => '/api/v1/runs/{runId}/status', 'verb' => 'GET'],
         ['name' => 'status#runFiles', 'url' => '/api/v1/runs/{runId}/files', 'verb' => 'GET'],
+        ['name' => 'status#runFailures', 'url' => '/api/v1/runs/{runId}/failures', 'verb' => 'GET'],
         ['name' => 'status#runReport', 'url' => '/api/v1/runs/{runId}/report', 'verb' => 'GET'],
         ['name' => 'status#runEvents', 'url' => '/api/v1/runs/{runId}/events', 'verb' => 'GET'],
     ],

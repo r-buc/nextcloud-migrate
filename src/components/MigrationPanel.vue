@@ -105,6 +105,7 @@
 						<th>Target user</th>
 						<th>Files</th>
 						<th>Transferred</th>
+						<th>Failed</th>
 						<th>Volume</th>
 					</tr>
 				</thead>
@@ -114,6 +115,7 @@
 						<td>{{ userMap.targetUserId }}</td>
 						<td>{{ userMap.totalFiles }}</td>
 						<td>{{ userMap.transferredFiles }}</td>
+						<td>{{ userMap.failedFiles }}</td>
 						<td>
 							<span>{{ formatBytes(userMap.transferredBytes) }} / {{ formatBytes(userMap.totalBytes) }}</span>
 							<NcProgressBar size="small" :value="volumePercent(userMap)" />
@@ -121,6 +123,38 @@
 					</tr>
 				</tbody>
 			</table>
+
+			<div v-if="status && status.run.failedFiles > 0" class="ncm-failures">
+				<NcButton variant="tertiary" @click="toggleFailures">
+					{{ showFailures ? 'Hide' : 'Show' }} failed files ({{ status.run.failedFiles }})
+				</NcButton>
+
+				<table v-if="showFailures" class="grid ncm-failures-table">
+					<thead>
+						<tr>
+							<th>Path</th>
+							<th>Stage</th>
+							<th>Attempts</th>
+							<th>Status</th>
+							<th>Error</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr v-for="file in failures" :key="file.id">
+							<td>{{ file.targetPath || file.sourcePath }}</td>
+							<td>{{ failureStageLabel(file.state) }}</td>
+							<td>{{ failureAttempts(file) }}</td>
+							<td>{{ file.nextRetryAt ? 'Will retry' : 'Permanently failed' }}</td>
+							<td>{{ file.lastError }}</td>
+						</tr>
+						<tr v-if="!loadingFailures && failures.length === 0">
+							<td colspan="5">
+								No failed files loaded yet.
+							</td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
 
 			<div class="ncm-actions">
 				<NcButton :disabled="cancelling" @click="cancel">
@@ -183,6 +217,17 @@ const STATE_LABELS = {
 	cancelled: 'Cancelled',
 }
 
+// Friendly labels for a failed file's `state` column (which stage it failed
+// in) - mapping_failed means the pre-transfer collision check against the
+// target failed (e.g. target unreachable), not an unresolvable naming
+// conflict (those are auto-resolved per the run's collision strategy and
+// never fail).
+const FAILURE_STAGE_LABELS = {
+	mapping_failed: 'Collision check',
+	transfer_failed: 'Transfer',
+	verification_failed: 'Verification',
+}
+
 export default {
 	name: 'MigrationPanel',
 	components: { NcButton, NcCheckboxRadioSwitch, NcNoteCard, NcProgressBar },
@@ -209,6 +254,9 @@ export default {
 			errorText: '',
 			pollTimer: null,
 			autoAdvanced: {},
+			showFailures: false,
+			failures: [],
+			loadingFailures: false,
 		}
 	},
 	computed: {
@@ -307,6 +355,12 @@ export default {
 				if (POLL_STOP_STATES.includes(status.run.state)) {
 					this.stopPolling()
 				}
+				// Keep an already-open failed-files list live too, since
+				// more files can fail (or exhaust their retries) between
+				// poll ticks.
+				if (this.showFailures) {
+					this.loadFailures()
+				}
 			})
 		},
 		// Kicks off discovery as soon as a run is created, and transfer as
@@ -366,6 +420,8 @@ export default {
 			this.run = null
 			this.status = null
 			this.showAdvanced = false
+			this.showFailures = false
+			this.failures = []
 			this.errorText = ''
 			this.loadLocalUsers()
 		},
@@ -380,6 +436,34 @@ export default {
 			const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
 			const value = bytes / (1024 ** unitIndex)
 			return `${unitIndex === 0 ? value : value.toFixed(1)} ${units[unitIndex]}`
+		},
+		toggleFailures() {
+			this.showFailures = !this.showFailures
+			if (this.showFailures) {
+				this.loadFailures()
+			}
+		},
+		loadFailures() {
+			if (!this.run) {
+				return
+			}
+			this.loadingFailures = true
+			return api.get(`/runs/${this.run.id}/failures?limit=200`)
+				.then((files) => {
+					this.failures = files
+				})
+				.catch((e) => {
+					this.errorText = `Failed to load failed files: ${apiErrorMessage(e)}`
+				})
+				.finally(() => {
+					this.loadingFailures = false
+				})
+		},
+		failureStageLabel(state) {
+			return FAILURE_STAGE_LABELS[state] || state
+		},
+		failureAttempts(file) {
+			return file.state === 'verification_failed' ? file.verifyAttempts : file.transferAttempts
 		},
 	},
 }
@@ -435,6 +519,17 @@ export default {
 .ncm-percent {
 	min-width: 3.5em;
 	text-align: right;
+}
+
+.ncm-failures {
+	margin-top: 12px;
+	margin-bottom: 12px;
+}
+
+.ncm-failures-table {
+	width: 100%;
+	max-width: 900px;
+	margin-top: 8px;
 }
 
 .ncm-raw-status {

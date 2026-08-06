@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\NextcloudMigrate\Service;
 
+use OCA\NextcloudMigrate\Db\MigrationEvent;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
@@ -337,6 +338,16 @@ class TransferService {
 		$exhausted = !$retryable || $attempts >= MigrationFile::MAX_TRANSFER_ATTEMPTS;
 
 		if (!$exhausted) {
+			// Transient (still-retryable) failure: logged at 'debug' so it
+			// doesn't clutter the run's event trail with routine retries,
+			// but is still visible when tailing the server log.
+			$this->eventLogger->log(
+				$file->getRunId(),
+				'transfer_retry',
+				"Transfer of '{$file->getSourcePath()}' failed (attempt {$attempts}/" . MigrationFile::MAX_TRANSFER_ATTEMPTS . "), will retry: {$message}",
+				MigrationEvent::SEVERITY_DEBUG,
+				$file->getId(),
+			);
 			$delay = self::BACKOFF_SECONDS[min($attempts - 1, count(self::BACKOFF_SECONDS) - 1)];
 			$file->setNextRetryAt(time() + $delay);
 			return;
@@ -346,6 +357,13 @@ class TransferService {
 		// unset. findTransferable() also filters on transfer_attempts < MAX,
 		// so this becomes terminal. Clean up any orphaned chunked-upload
 		// staging collection on the target so we don't leak storage there.
+		$this->eventLogger->log(
+			$file->getRunId(),
+			'transfer_failed',
+			"Transfer of '{$file->getSourcePath()}' permanently failed after {$attempts} attempt(s): {$message}",
+			MigrationEvent::SEVERITY_ERROR,
+			$file->getId(),
+		);
 		$file->setNextRetryAt(null);
 		if ($file->getTransferId() !== null) {
 			$this->webDavClient->abortChunkedUpload($instance, $targetUserId, $appPassword, $file->getTransferId());

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\NextcloudMigrate\Service;
 
+use OCA\NextcloudMigrate\Db\MigrationEvent;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
@@ -24,6 +25,7 @@ class MappingService {
 	public function __construct(
 		private WebDavClient $webDavClient,
 		private MigrationFileMapper $fileMapper,
+		private EventLogger $eventLogger,
 	) {
 	}
 
@@ -61,6 +63,13 @@ class MappingService {
 			$file->setLastError('Collision check failed: ' . $e->getMessage());
 			$file->setUpdatedAt($now);
 			$this->fileMapper->update($file);
+			$this->eventLogger->log(
+				$file->getRunId(),
+				'mapping_failed',
+				"Collision check for '{$file->getSourcePath()}' failed: {$e->getMessage()}",
+				MigrationEvent::SEVERITY_ERROR,
+				$file->getId(),
+			);
 			return;
 		}
 

@@ -70,6 +70,34 @@ class MigrationFileMapper extends QBMapper {
 	}
 
 	/**
+	 * Files currently sitting in any terminal-or-transient failure state
+	 * (mapping_failed, transfer_failed, verification_failed), most
+	 * recently updated first - used to surface failure reasons (lastError)
+	 * to the admin UI. Includes rows that are still within their retry
+	 * budget as well as permanently-exhausted ones; the caller can use
+	 * transferAttempts/verifyAttempts (and MAX_TRANSFER_ATTEMPTS/
+	 * MAX_VERIFY_ATTEMPTS) to tell them apart if needed.
+	 *
+	 * @return MigrationFile[]
+	 * @throws Exception
+	 */
+	public function findFailed(int $runId, int $limit = 100, int $offset = 0): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('*')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->in('state', $qb->createNamedParameter(
+				[MigrationFile::STATE_MAPPING_FAILED, MigrationFile::STATE_TRANSFER_FAILED, MigrationFile::STATE_VERIFICATION_FAILED],
+				IQueryBuilder::PARAM_STR_ARRAY
+			)))
+			->setMaxResults($limit)
+			->setFirstResult($offset)
+			->orderBy('updated_at', 'DESC');
+
+		return $this->findEntities($qb);
+	}
+
+	/**
 	 * Find files eligible for a transfer worker to pick up: not currently
 	 * locked (or lock expired) and, if previously failed, past their retry
 	 * backoff deadline.

@@ -185,6 +185,24 @@ class StatusController extends Controller {
 		return new JSONResponse($files);
 	}
 
+	/**
+	 * Files currently in a failure state (mapping_failed, transfer_failed,
+	 * verification_failed), most recently updated first - drives the admin
+	 * UI's "Failed files" list so admins can see exactly why each file
+	 * failed (lastError) instead of just an aggregate count.
+	 */
+	public function runFailures(int $runId, int $limit = 100, int $offset = 0): JSONResponse {
+		$run = $this->ownedRun($runId);
+		if ($run instanceof JSONResponse) {
+			return $run;
+		}
+
+		$limit = max(1, min($limit, 500));
+		$files = $this->fileMapper->findFailed($runId, $limit, $offset);
+
+		return new JSONResponse($files);
+	}
+
 	public function runReport(int $runId): JSONResponse {
 		$run = $this->ownedRun($runId);
 		if ($run instanceof JSONResponse) {

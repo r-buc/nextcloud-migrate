@@ -8,6 +8,7 @@ use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
 use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
+use OCA\NextcloudMigrate\Service\EventLogger;
 use OCA\NextcloudMigrate\Service\MappingService;
 use OCA\NextcloudMigrate\Service\WebDavClient;
 use PHPUnit\Framework\TestCase;
@@ -15,12 +16,14 @@ use PHPUnit\Framework\TestCase;
 final class MappingServiceTest extends TestCase {
 	private WebDavClient $webDavClient;
 	private MigrationFileMapper $fileMapper;
+	private EventLogger $eventLogger;
 	private MappingService $mappingService;
 
 	protected function setUp(): void {
 		$this->webDavClient = $this->createMock(WebDavClient::class);
 		$this->fileMapper = $this->createMock(MigrationFileMapper::class);
-		$this->mappingService = new MappingService($this->webDavClient, $this->fileMapper);
+		$this->eventLogger = $this->createMock(EventLogger::class);
+		$this->mappingService = new MappingService($this->webDavClient, $this->fileMapper, $this->eventLogger);
 	}
 
 	private function makeFile(string $sourcePath, bool $isDirectory = false): MigrationFile {

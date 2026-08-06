@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\NextcloudMigrate\Service;
 
+use OCA\NextcloudMigrate\Db\MigrationEvent;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
@@ -18,6 +19,7 @@ class VerificationService {
 	public function __construct(
 		private WebDavClient $webDavClient,
 		private MigrationFileMapper $fileMapper,
+		private EventLogger $eventLogger,
 	) {
 	}
 
@@ -67,9 +69,23 @@ class VerificationService {
 			// (possibly corrupt) remote content.
 			$file->setState(MigrationFile::STATE_TRANSFER_FAILED);
 			$file->setNextRetryAt(time());
+			$this->eventLogger->log(
+				$file->getRunId(),
+				'verification_retry',
+				"Verification of '{$file->getTargetPath()}' failed (attempt {$attempts}/" . MigrationFile::MAX_VERIFY_ATTEMPTS . "), re-transferring: {$reason}",
+				MigrationEvent::SEVERITY_DEBUG,
+				$file->getId(),
+			);
 		} else {
 			$file->setState(MigrationFile::STATE_VERIFICATION_FAILED);
 			$file->setNextRetryAt(null);
+			$this->eventLogger->log(
+				$file->getRunId(),
+				'verification_failed',
+				"Verification of '{$file->getTargetPath()}' permanently failed after {$attempts} attempt(s): {$reason}",
+				MigrationEvent::SEVERITY_ERROR,
+				$file->getId(),
+			);
 		}
 	}
 }
