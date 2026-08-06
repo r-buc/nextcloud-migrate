@@ -140,6 +140,22 @@ ACLs.
   `GET /runs` (and therefore the admin page, which always shows only the
   latest/current run) goes back to the create-a-migration form on the next
   load, rather than re-showing the same old finished run indefinitely.
+- **Retrying failed files**: a run that finished with failures
+  (`completed_with_errors`) shows a "Retry failed files" button alongside
+  "Show failed files". `POST /runs/{id}/retry-failures`
+  (`RunOrchestrator::retryFailures()`) resets every currently-failed file
+  (`mapping_failed`/`transfer_failed`/`verification_failed`) back to
+  `DISCOVERED` with attempts/lock/retry state cleared -
+  `MigrationFileMapper::resetFailuresForRetry()` - including files that had
+  already exhausted their retry budget, which would otherwise never be
+  picked up again. Verification failures get a full re-transfer rather
+  than just re-verification, mirroring `VerificationService`'s own
+  reasoning that a checksum mismatch makes the target-side bytes suspect.
+  The run is then re-armed by momentarily treating it as `PAUSED` and
+  reusing `resumeRun()`'s existing TRANSFERRING/VERIFYING/FINALIZING
+  decision logic. The admin UI's failed-files table also resolves each
+  file's `userMapId` against the per-user table already in the status
+  response to show which mapped user it belongs to.
 - **v1 simplification**: one target instance and one current run per admin
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the

@@ -98,6 +98,42 @@ class MigrationFileMapper extends QBMapper {
 	}
 
 	/**
+	 * Resets every currently-failed file (mapping_failed, transfer_failed,
+	 * verification_failed) for a run back to DISCOVERED with attempt
+	 * counters and retry/lock state cleared, so an admin-triggered retry
+	 * starts each one over from scratch - including files that had already
+	 * exhausted their retry budget, which would otherwise never be picked
+	 * up again by findTransferable()/findVerifiable(). A full re-transfer
+	 * (not just re-verification) is used even for verification_failed
+	 * rows, mirroring VerificationService::recordMismatch()'s own
+	 * reasoning: a checksum mismatch means the bytes already on the target
+	 * are suspect, so the safest recovery is a full re-upload rather than
+	 * re-checking the same (possibly corrupt) remote content.
+	 *
+	 * @return int number of rows reset
+	 * @throws Exception
+	 */
+	public function resetFailuresForRetry(int $runId): int {
+		$qb = $this->db->getQueryBuilder();
+		$qb->update($this->getTableName())
+			->set('state', $qb->createNamedParameter(MigrationFile::STATE_DISCOVERED))
+			->set('transfer_attempts', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
+			->set('verify_attempts', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT))
+			->set('last_error', $qb->createNamedParameter(null))
+			->set('next_retry_at', $qb->createNamedParameter(null))
+			->set('lock_owner', $qb->createNamedParameter(null))
+			->set('lock_expires_at', $qb->createNamedParameter(null))
+			->set('updated_at', $qb->createNamedParameter(time(), IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->in('state', $qb->createNamedParameter(
+				[MigrationFile::STATE_MAPPING_FAILED, MigrationFile::STATE_TRANSFER_FAILED, MigrationFile::STATE_VERIFICATION_FAILED],
+				IQueryBuilder::PARAM_STR_ARRAY
+			)));
+
+		return $qb->executeStatement();
+	}
+
+	/**
 	 * Find files eligible for a transfer worker to pick up: not currently
 	 * locked (or lock expired) and, if previously failed, past their retry
 	 * backoff deadline.

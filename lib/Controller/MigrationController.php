@@ -294,6 +294,26 @@ class MigrationController extends Controller {
 	}
 
 	/**
+	 * Retries every currently-failed file on a finished (completed with
+	 * errors) run, resetting even permanently-exhausted failures for a
+	 * fresh attempt (see RunOrchestrator::retryFailures()).
+	 */
+	public function retryFailures(int $runId): JSONResponse {
+		$run = $this->ownedRun($runId);
+		if ($run instanceof JSONResponse) {
+			return $run;
+		}
+
+		try {
+			$run = $this->runOrchestrator->retryFailures($runId);
+		} catch (\RuntimeException $e) {
+			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_CONFLICT);
+		}
+
+		return new JSONResponse($run);
+	}
+
+	/**
 	 * Permanently removes a finished run and everything recorded for it.
 	 * Only allowed once the run has reached a state where nothing more will
 	 * happen to it on its own (see RunOrchestrator::deleteRun()).

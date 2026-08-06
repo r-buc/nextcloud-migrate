@@ -128,10 +128,14 @@
 				<NcButton variant="tertiary" @click="toggleFailures">
 					{{ showFailures ? 'Hide' : 'Show' }} failed files ({{ status.run.failedFiles }})
 				</NcButton>
+				<NcButton v-if="canRetryFailures" :disabled="retrying" @click="retryFailures">
+					Retry failed files
+				</NcButton>
 
 				<table v-if="showFailures" class="grid ncm-failures-table">
 					<thead>
 						<tr>
+							<th>User</th>
 							<th>Path</th>
 							<th>Stage</th>
 							<th>Attempts</th>
@@ -141,6 +145,7 @@
 					</thead>
 					<tbody>
 						<tr v-for="file in failures" :key="file.id">
+							<td>{{ failureUserLabel(file) }}</td>
 							<td>{{ file.targetPath || file.sourcePath }}</td>
 							<td>{{ failureStageLabel(file.state) }}</td>
 							<td>{{ failureAttempts(file) }}</td>
@@ -148,7 +153,7 @@
 							<td>{{ file.lastError }}</td>
 						</tr>
 						<tr v-if="!loadingFailures && failures.length === 0">
-							<td colspan="5">
+							<td colspan="6">
 								No failed files loaded yet.
 							</td>
 						</tr>
@@ -260,6 +265,7 @@ export default {
 			showFailures: false,
 			failures: [],
 			loadingFailures: false,
+			retrying: false,
 		}
 	},
 	computed: {
@@ -271,6 +277,11 @@ export default {
 		// sense, so the button becomes "Done" and removes the run instead.
 		isDone() {
 			return !!this.run && POLL_STOP_STATES.includes(this.run.state)
+		},
+		// Mirrors the backend's RunOrchestrator::retryFailures() allowed
+		// states - only a run that finished WITH failures can be retried.
+		canRetryFailures() {
+			return !!this.run && ['completed_with_errors', 'failed'].includes(this.run.state)
 		},
 	},
 	mounted() {
@@ -424,6 +435,27 @@ export default {
 					this.resetToCreateForm()
 				})
 		},
+		retryFailures() {
+			if (!this.run) {
+				return
+			}
+			this.retrying = true
+			this.errorText = ''
+			api.post(`/runs/${this.run.id}/retry-failures`)
+				.then((run) => {
+					this.run = run
+					this.showFailures = false
+					this.failures = []
+					this.startPolling()
+					this.refreshStatus()
+				})
+				.catch((e) => {
+					this.errorText = `Failed to retry failed files: ${apiErrorMessage(e)}`
+				})
+				.finally(() => {
+					this.retrying = false
+				})
+		},
 		closeRun() {
 			if (!this.run) {
 				this.resetToCreateForm()
@@ -490,6 +522,18 @@ export default {
 		},
 		failureAttempts(file) {
 			return file.state === 'verification_failed' ? file.verifyAttempts : file.transferAttempts
+		},
+		// Failed files only carry a userMapId, not a username - resolve it
+		// against the per-user table already loaded in `status.userMaps` so
+		// the admin can see which mapped user each failure belongs to.
+		failureUserLabel(file) {
+			const userMap = this.status && this.status.userMaps.find((u) => u.id === file.userMapId)
+			if (!userMap) {
+				return `#${file.userMapId}`
+			}
+			return userMap.sourceUserId === userMap.targetUserId
+				? userMap.sourceUserId
+				: `${userMap.sourceUserId} \u2192 ${userMap.targetUserId}`
 		},
 	},
 }

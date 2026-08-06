@@ -489,6 +489,39 @@ class RunOrchestrator {
 		return $run;
 	}
 
+	/**
+	 * Admin-triggered retry of every currently-failed file on a finished
+	 * run: resets them all back to DISCOVERED (see
+	 * MigrationFileMapper::resetFailuresForRetry() - including files that
+	 * had already exhausted their retry budget, which would otherwise
+	 * never be picked up again) and re-arms the run, reusing resumeRun()'s
+	 * existing phase-decision logic by momentarily treating the run as
+	 * PAUSED.
+	 *
+	 * @throws \RuntimeException if the run hasn't finished with failures,
+	 *         or has no failed files to retry
+	 */
+	public function retryFailures(int $runId): MigrationRun {
+		$run = $this->runMapper->find($runId);
+		$retryableStates = [MigrationRun::STATE_COMPLETED_WITH_ERRORS, MigrationRun::STATE_FAILED];
+		if (!in_array($run->getState(), $retryableStates, true)) {
+			throw new \RuntimeException("Run must have finished with failures to retry failed files (currently '{$run->getState()}')");
+		}
+
+		$resetCount = $this->fileMapper->resetFailuresForRetry($runId);
+		if ($resetCount === 0) {
+			throw new \RuntimeException('No failed files to retry');
+		}
+
+		$this->eventLogger->log($runId, 'retry_requested', "Admin requested retry of {$resetCount} failed file(s)");
+
+		$run->setState(MigrationRun::STATE_PAUSED);
+		$run->setFinishedAt(null);
+		$this->runMapper->update($run);
+
+		return $this->resumeRun($runId);
+	}
+
 	public function cancelRun(int $runId): MigrationRun {
 		$run = $this->runMapper->find($runId);
 		$terminal = [MigrationRun::STATE_COMPLETED, MigrationRun::STATE_COMPLETED_WITH_ERRORS, MigrationRun::STATE_CANCELLED, MigrationRun::STATE_FAILED];

@@ -173,6 +173,42 @@ final class RunOrchestratorTest extends TestCase {
 		$this->orchestrator->deleteRun(42);
 	}
 
+	public function testRetryFailuresRejectsFromWrongState(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_COMPLETED));
+
+		$this->fileMapper->expects($this->never())->method('resetFailuresForRetry');
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->retryFailures(42);
+	}
+
+	public function testRetryFailuresRejectsWhenNothingToRetry(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_COMPLETED_WITH_ERRORS));
+		$this->fileMapper->method('resetFailuresForRetry')->willReturn(0);
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->retryFailures(42);
+	}
+
+	public function testRetryFailuresResetsFilesAndResumesIntoTransferring(): void {
+		$run = $this->makeRun(MigrationRun::STATE_COMPLETED_WITH_ERRORS);
+		$run->setFinishedAt(1234);
+		$this->runMapper->method('find')->willReturn($run);
+		$this->fileMapper->method('resetFailuresForRetry')->willReturn(5);
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_DISCOVERED => 5,
+		]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(EnqueueTransfersJob::class, ['runId' => 42], 0);
+
+		$run = $this->orchestrator->retryFailures(42);
+
+		self::assertSame(MigrationRun::STATE_TRANSFERRING, $run->getState());
+		self::assertNull($run->getFinishedAt());
+	}
+
 	public function testResumeRunRejectsNonPausedRun(): void {
 		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_TRANSFERRING));
 
