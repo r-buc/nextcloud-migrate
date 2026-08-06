@@ -548,7 +548,7 @@ XML;
 		$status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
 		if ($status >= 400) {
-			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri}): " . $this->summarizeErrorBody((string)$responseBody), $status);
+			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri}, " . strlen($uri) . ' byte URI): ' . $this->summarizeErrorBody((string)$responseBody), $status);
 		}
 
 		return ['status' => $status, 'body' => (string)$responseBody, 'headers' => $responseHeaders];
@@ -563,11 +563,25 @@ XML;
 	 * or the Nextcloud server log. Prefers the DAV server's own
 	 * <s:message> (Sabre/DAV's error response format, used by Nextcloud's
 	 * own DAV backend) when present, falling back to a truncated raw body.
+	 *
+	 * When there's no <s:message> at all, the response almost certainly
+	 * never reached Nextcloud's own DAV code in the first place (it always
+	 * responds in that format) - i.e. something in front of it (reverse
+	 * proxy/WAF/load balancer) rejected the request first. If that's only
+	 * happening for a minority of files rather than every request, the
+	 * most common real-world cause is the request line (this app's URIs
+	 * are already percent-encoded per RFC 3986, but each non-ASCII byte in
+	 * a long/deeply-nested path still triples in size) exceeding the
+	 * proxy's request-line/header buffer limit (e.g. nginx/openresty's
+	 * `client_header_buffer_size`/`large_client_header_buffers`), or a WAF
+	 * rule flagging specific byte sequences in unusual filenames - append
+	 * a pointer to that in the returned summary so it doesn't require a
+	 * follow-up round-trip to figure out where to even start looking.
 	 */
 	private function summarizeErrorBody(string $body): string {
 		$trimmed = trim($body);
 		if ($trimmed === '') {
-			return '(empty response body)';
+			return '(empty response body) - no Sabre/DAV error detail either, so this likely never reached Nextcloud\'s own DAV code: check for a reverse proxy/WAF in front of the target rejecting some requests (e.g. a request-line/header size limit for long or non-ASCII paths).';
 		}
 
 		if (preg_match('#<s:message>(.*?)</s:message>#s', $trimmed, $matches) === 1) {
@@ -578,10 +592,11 @@ XML;
 		}
 
 		$snippet = trim(preg_replace('/\s+/', ' ', $trimmed) ?? $trimmed);
-
-		return mb_strlen($snippet) > self::ERROR_BODY_SNIPPET_LENGTH
+		$snippet = mb_strlen($snippet) > self::ERROR_BODY_SNIPPET_LENGTH
 			? mb_substr($snippet, 0, self::ERROR_BODY_SNIPPET_LENGTH) . '…'
 			: $snippet;
+
+		return $snippet . ' (no Sabre/DAV error detail - likely rejected before reaching Nextcloud\'s own DAV code by something in front of it; if this only affects some files, check the target\'s reverse proxy/WAF for a request-line/header size limit, e.g. long or non-ASCII paths tripping nginx\'s client_header_buffer_size/large_client_header_buffers)';
 	}
 
 	private function statusFromException(\Exception $e): ?int {

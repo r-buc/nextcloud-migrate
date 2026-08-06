@@ -43,6 +43,22 @@ ACLs.
   This is a point-in-time migration, not continuous sync: edits made only
   *after* a file has already been verified are not detected or re-migrated.
   Avoid heavy write activity on the source during a run.
+- **Stale source filecache metadata**: the torn-read guard above also
+  compares the number of bytes *actually read* against the file's reported
+  `getSize()` - even when mtime/size report completely unchanged before
+  and after the read. Without this, a file whose filecache `size` column
+  doesn't match its real readable content (seen in practice on old files,
+  years-old data possibly left inconsistent by a historical Nextcloud
+  client/server sync bug) would have a WRONG Content-Length declared to
+  the target; a reverse proxy/WAF in front of the target instance can then
+  reject the request outright with a generic, unhelpful error (e.g. a bare
+  "400 Bad Request" HTML page with no Nextcloud-side detail at all,
+  identical across every affected file regardless of path/size/type).
+  `TransferService::assertNotChangedDuringRead()` catches this and reports
+  it as a specific, actionable "source file may be corrupted/inconsistent"
+  failure instead. If a file keeps failing this way even after a manual
+  retry, try `occ files:scan --path="/<user>/files/<relative path>"` on
+  the SOURCE instance to refresh its filecache entry before retrying again.
 - **Orchestration**: entirely native Nextcloud background jobs (no
   Redis/external queue). One self-perpetuating `TransferWorkerJob` (then
   one `VerifyWorkerJob`) lineage per mapped user, each processing many

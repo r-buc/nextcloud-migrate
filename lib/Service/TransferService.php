@@ -132,6 +132,7 @@ class TransferService {
 		// buffer avoids holding large files fully in PHP memory).
 		$buffer = fopen('php://temp/maxmemory:2097152', 'r+');
 		$ctx = hash_init('sha256');
+		$bytesRead = 0;
 		while (!feof($source)) {
 			$chunk = fread($source, 8 * 1024 * 1024);
 			if ($chunk === false || $chunk === '') {
@@ -139,12 +140,13 @@ class TransferService {
 			}
 			hash_update($ctx, $chunk);
 			fwrite($buffer, $chunk);
+			$bytesRead += strlen($chunk);
 		}
 		fclose($source);
 		$sha256 = hash_final($ctx);
 		rewind($buffer);
 
-		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesRead);
 
 		$this->webDavClient->putFile(
 			$instance,
@@ -152,14 +154,14 @@ class TransferService {
 			$appPassword,
 			$file->getTargetPath() ?? $sourcePath,
 			$buffer,
-			$preSize,
+			$bytesRead,
 			$preMtime,
 			$sha256,
 		);
 		fclose($buffer);
 
 		$file->setSourceChecksum($sha256);
-		$file->setBytesTransferred($preSize);
+		$file->setBytesTransferred($bytesRead);
 	}
 
 	/**
@@ -238,7 +240,7 @@ class TransferService {
 		}
 		fclose($source);
 
-		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize);
+		$this->assertNotChangedDuringRead($file, $instance, $targetUserId, $appPassword, $sourceUserId, $preMtime, $preSize, $bytesAccounted);
 
 		$sha256 = hash_final($ctx);
 		$this->webDavClient->assembleChunkedUpload(
@@ -264,6 +266,23 @@ class TransferService {
 	 * Re-fetches the node (rather than reusing the in-memory one, which may
 	 * cache stale metadata) so this reflects the true current state.
 	 *
+	 * Also compares the number of bytes actually read/buffered against the
+	 * pre-read reported size: previously the declared upload/Content-Length
+	 * was always the pre-read `getSize()` value, even when the storage
+	 * backend's actual readable content came up short (or long) with
+	 * mtime/size metadata reporting completely unchanged before AND after -
+	 * i.e. not a genuine concurrent edit at all. Declaring a Content-Length
+	 * that doesn't match what's actually sent breaks HTTP framing for any
+	 * reverse proxy/WAF in front of the target, which can reject the request
+	 * outright with a generic, unhelpful error (e.g. a bare "400 Bad
+	 * Request" page with no Nextcloud-side detail at all) - so this is
+	 * caught here explicitly instead, with a specific, actionable message
+	 * pointing at the source file rather than a confusing transport-level
+	 * failure. If this keeps recurring for the same file across manual
+	 * retries, that's a strong signal the source file itself is
+	 * inconsistent/corrupted on this instance's storage backend, not a
+	 * transient blip.
+	 *
 	 * Chunk-level resume assumes byte-stable content across attempts, so on
 	 * drift we also invalidate any in-progress chunked-upload session
 	 * (abort the staging collection + clear transferId/nextChunkIndex)
@@ -281,19 +300,25 @@ class TransferService {
 		string $sourceUserId,
 		int $preMtime,
 		int $preSize,
+		int $bytesRead,
 	): void {
 		$fresh = $this->rootFolder->getUserFolder($sourceUserId)->get($file->getSourcePath());
-		if ($fresh->getMTime() === $preMtime && $fresh->getSize() === $preSize) {
+		if ($fresh->getMTime() === $preMtime && $fresh->getSize() === $preSize && $bytesRead === $preSize) {
 			return;
 		}
+
+		$metadataUnchanged = $fresh->getMTime() === $preMtime && $fresh->getSize() === $preSize;
+		$reason = $metadataUnchanged
+			? "reported unchanged metadata (size {$preSize}) but only {$bytesRead} byte(s) could actually be read - the source file may be corrupted/inconsistent on this instance's storage backend"
+			: 'changed while being read';
 
 		$this->eventLogger->log(
 			$file->getRunId(),
 			'source_drift_detected',
-			"Source file '{$file->getSourcePath()}' changed while being read; retrying with latest content",
+			"Source file '{$file->getSourcePath()}' {$reason}; retrying",
 			'warning',
 			$file->getId(),
-			['preMtime' => $preMtime, 'preSize' => $preSize, 'postMtime' => $fresh->getMTime(), 'postSize' => $fresh->getSize()],
+			['preMtime' => $preMtime, 'preSize' => $preSize, 'postMtime' => $fresh->getMTime(), 'postSize' => $fresh->getSize(), 'bytesRead' => $bytesRead],
 		);
 
 		if ($file->getTransferId() !== null) {
@@ -303,7 +328,7 @@ class TransferService {
 			$file->setBytesTransferred(0);
 		}
 
-		throw new TransferException("Source file '{$file->getSourcePath()}' changed while being read", true);
+		throw new TransferException("Source file '{$file->getSourcePath()}' {$reason}", true);
 	}
 
 	/**
