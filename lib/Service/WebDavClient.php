@@ -32,6 +32,11 @@ use Psr\Log\LoggerInterface;
  */
 class WebDavClient {
 	private const REQUEST_TIMEOUT = 60;
+	// How much of a failed request's response body to include in exception
+	// messages (see summarizeErrorBody()) when it's not a recognized DAV
+	// error format worth extracting a message from - just enough to be
+	// useful without dumping an entire HTML error page into logs/lastError.
+	private const ERROR_BODY_SNIPPET_LENGTH = 300;
 
 	// Reused across requests (see execute()) so repeated calls to the same
 	// target instance within a single job execution - e.g. TransferWorkerJob
@@ -543,10 +548,40 @@ XML;
 		$status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
 		if ($status >= 400) {
-			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri})", $status);
+			throw new \RuntimeException("WebDAV request returned HTTP {$status} ({$method} {$uri}): " . $this->summarizeErrorBody((string)$responseBody), $status);
 		}
 
 		return ['status' => $status, 'body' => (string)$responseBody, 'headers' => $responseHeaders];
+	}
+
+	/**
+	 * Extracts a short, actionable snippet from a failed WebDAV response
+	 * body for inclusion in exception messages - previously the body was
+	 * discarded entirely, so a failure only ever surfaced as a bare
+	 * "HTTP 400" with no indication of WHY (permission denied, quota
+	 * exceeded, invalid path, etc.) anywhere in lastError, the event log,
+	 * or the Nextcloud server log. Prefers the DAV server's own
+	 * <s:message> (Sabre/DAV's error response format, used by Nextcloud's
+	 * own DAV backend) when present, falling back to a truncated raw body.
+	 */
+	private function summarizeErrorBody(string $body): string {
+		$trimmed = trim($body);
+		if ($trimmed === '') {
+			return '(empty response body)';
+		}
+
+		if (preg_match('#<s:message>(.*?)</s:message>#s', $trimmed, $matches) === 1) {
+			$message = trim(html_entity_decode($matches[1]));
+			if ($message !== '') {
+				return $message;
+			}
+		}
+
+		$snippet = trim(preg_replace('/\s+/', ' ', $trimmed) ?? $trimmed);
+
+		return mb_strlen($snippet) > self::ERROR_BODY_SNIPPET_LENGTH
+			? mb_substr($snippet, 0, self::ERROR_BODY_SNIPPET_LENGTH) . '…'
+			: $snippet;
 	}
 
 	private function statusFromException(\Exception $e): ?int {

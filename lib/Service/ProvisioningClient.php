@@ -21,6 +21,11 @@ use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
  */
 class ProvisioningClient {
 	private const REQUEST_TIMEOUT = 30;
+	// How much of a failed request's response body to include in exception
+	// messages (see summarizeErrorBody()) when it's not the usual OCS JSON
+	// envelope - just enough to be useful without dumping an entire error
+	// page into logs/lastError.
+	private const ERROR_BODY_SNIPPET_LENGTH = 300;
 
 	/**
 	 * Confirms the admin credential is valid and has provisioning rights by
@@ -104,7 +109,13 @@ class ProvisioningClient {
 		curl_close($ch);
 
 		if ($httpStatus >= 400) {
-			throw new RemoteConnectionException("Provisioning API returned HTTP {$httpStatus} ({$method} {$ocsPath})", $httpStatus);
+			// The OCS API usually still returns its normal JSON envelope
+			// (ocs.meta.message) even on a 4xx/5xx HTTP status - previously
+			// the body was discarded entirely here, so a failure only ever
+			// surfaced as a bare "HTTP 400" with no indication of why
+			// (e.g. invalid username, policy violation) anywhere in the
+			// logs. Fall back to a raw snippet if it's not that shape.
+			throw new RemoteConnectionException("Provisioning API returned HTTP {$httpStatus} ({$method} {$ocsPath}): " . $this->summarizeErrorBody((string)$body), $httpStatus);
 		}
 
 		$data = json_decode((string)$body, true);
@@ -121,5 +132,31 @@ class ProvisioningClient {
 		}
 
 		return $data;
+	}
+
+	/**
+	 * Extracts a short, actionable message from a failed OCS API response
+	 * body: prefers the standard ocs.meta.message field, falling back to a
+	 * truncated raw snippet if the body isn't valid JSON in that shape
+	 * (e.g. an HTML error page from a proxy/load balancer in front of the
+	 * target instance).
+	 */
+	private function summarizeErrorBody(string $body): string {
+		$trimmed = trim($body);
+		if ($trimmed === '') {
+			return '(empty response body)';
+		}
+
+		$data = json_decode($trimmed, true);
+		$message = $data['ocs']['meta']['message'] ?? null;
+		if (is_string($message) && $message !== '') {
+			return $message;
+		}
+
+		$snippet = trim(preg_replace('/\s+/', ' ', $trimmed) ?? $trimmed);
+
+		return mb_strlen($snippet) > self::ERROR_BODY_SNIPPET_LENGTH
+			? mb_substr($snippet, 0, self::ERROR_BODY_SNIPPET_LENGTH) . '…'
+			: $snippet;
 	}
 }
