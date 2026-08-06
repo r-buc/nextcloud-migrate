@@ -144,7 +144,7 @@ ACLs.
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the
   latest/current run. A run can still cover many mapped users at once.
-- **Admin UI**: a Vue 3 app (`src/`, built with `@nextcloud/vue` components -
+- **Admin UI**: a Vue 2 app (`src/`, built with `@nextcloud/vue@8.x` components -
   `NcButton`, `NcTextField`, `NcCheckboxRadioSwitch`, `NcNoteCard`,
   `NcProgressBar` - the same library and components Nextcloud's own Settings
   app uses, e.g. for the Users page's quota bar) replacing the old
@@ -245,18 +245,28 @@ composer test
 
 ## Frontend build
 
-The admin settings page is a Vue 3 app (`src/`) built with webpack via
-`@nextcloud/webpack-vue-config`. Vue 3 (not NC28-core's own Vue 2) was
-chosen deliberately: each app bundles its own isolated Vue instance (no
-runtime shared with core), and the installed `@nextcloud/vue@9.9.0`'s
-components (`NcTextField`, `NcButton`, etc.) are themselves written with
-Vue-3-only Composition API features (`<script setup>`, `defineModel`) - so
-despite `@nextcloud/vue`'s peer dependency nominally allowing Vue 2.7,
-Vue 3 is the only version this specific component version is actually
-built against. `vendor/` and the built `js/*.js` bundle
-are both gitignored (not committed) - like `vendor/`, they must be
-generated locally before the app will actually load in a real Nextcloud
-instance, and regenerated after any `src/` change:
+The admin settings page is a Vue 2 app (`src/`) built with webpack via
+`@nextcloud/webpack-vue-config`. Pinned to `vue@^2.7.16` +
+`@nextcloud/vue@^8.40.0` **deliberately**, not the latest `@nextcloud/vue@9`
+(Vue 3): v9's components assume Nextcloud's newer design-token CSS custom
+properties (`--border-radius-element`, `--clickable-area-small`,
+`--default-grid-baseline`, etc., introduced in the Nextcloud 30 theming
+redesign - confirmed by diffing `apps/theming/lib/Themes/DefaultTheme.php`
+across tags) with **no fallback values**, so on our declared
+`min-version="27"` (NC27-29 don't define those variables at all) v9
+components silently lose their styling entirely - e.g. `NcButton` renders
+as an unstyled near-square instead of its intended shape, with no error
+anywhere. `@nextcloud/vue@8.x`'s CSS instead writes those same rules with
+an explicit CSS `var()` fallback (e.g. `--button-radius:
+var(--border-radius-element, calc(var(--button-size) / 2))` - a full pill
+shape when the newer token is undefined), so it degrades gracefully on
+NC27-29 while still picking up the newer token's value automatically on
+NC30+ (which also keeps the old token names as aliases for exactly this
+backward-compatibility reason). Confirmed by visually comparing rendered
+buttons against a real NC28 instance before/after this pin. `vendor/` and
+the built `js/*.js` bundle are both gitignored (not committed) - like
+`vendor/`, they must be generated locally before the app will actually load
+in a real Nextcloud instance, and regenerated after any `src/` change:
 
 ```bash
 npm install
