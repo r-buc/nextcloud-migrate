@@ -243,3 +243,27 @@ file-lookup order this depends on. Component styles are plain
 Vue SFC `<style scoped>` blocks bundled inline via `style-loader` (injected
 at runtime), so there is no separate CSS file/`addStyle()` call to keep in
 sync.
+
+## Release automation
+
+`.github/workflows/release.yml` automates the documented Nextcloud app
+release flow when a GitHub release is published:
+
+- validates that the release tag version matches `appinfo/info.xml` and
+ `package.json`
+- installs dependencies, runs the existing PHP checks, and builds the
+ frontend bundle
+- assembles a production tarball with the correct `nextcloud_migrate/`
+ top-level directory
+- signs the packaged app with `occ integrity:sign-app`
+- uploads the `.tar.gz` archive to the GitHub release
+- publishes the same archive to the Nextcloud App Store
+
+Configure these GitHub Actions secrets before publishing a release:
+
+- `APP_PRIVATE_KEY`: the app private key issued for `nextcloud_migrate`
+- `APP_PUBLIC_CRT`: the matching Nextcloud signing certificate
+- `APPSTORE_TOKEN`: a Nextcloud App Store API token
+
+The workflow is configured to use a protected `release` environment for
+those secrets and approvals, matching Nextcloud's recommended release setup.
