@@ -87,45 +87,13 @@ jobs:
             exit 1
           fi
 
-      - name: Install development dependencies
-        run: |
-          composer install --no-interaction --no-progress --prefer-dist
-          npm ci
+      - name: Build release archive
+        run: scripts/build-release.sh --output "$RUNNER_TEMP/${APP_ID}.tar.gz"
 
       - name: Validate PHP
         run: |
           composer lint
           composer test
-
-      - name: Build frontend bundle
-        run: npm run build
-
-      - name: Assemble unsigned release archive
-        run: |
-          set -euo pipefail
-
-          build_root="$RUNNER_TEMP/appstore"
-          release_dir="$build_root/$APP_ID"
-          archive_path="$RUNNER_TEMP/${APP_ID}.tar.gz"
-
-          rm -rf "$build_root" "$archive_path"
-          mkdir -p "$release_dir"
-
-          rsync -a --exclude-from="$GITHUB_WORKSPACE/.distignore" "$GITHUB_WORKSPACE/" "$release_dir/"
-
-          composer install \
-            --working-dir="$release_dir" \
-            --no-dev \
-            --no-interaction \
-            --no-progress \
-            --prefer-dist \
-            --optimize-autoloader
-
-          rm -f \
-            "$release_dir/composer.json" \
-            "$release_dir/composer.lock"
-
-          tar -czf "$archive_path" -C "$build_root" "$APP_ID"
 
       - name: Upload unsigned app tarball as artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
