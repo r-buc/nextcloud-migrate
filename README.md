@@ -254,10 +254,11 @@ release flow when a GitHub release is published:
 - installs dependencies, runs the existing PHP checks, and builds the
  frontend bundle
 - assembles a production tarball with the correct `nextcloud_migrate/`
- top-level directory
+ top-level directory, using `.distignore` to keep development-only files out
 - signs the packaged app with `occ integrity:sign-app`
 - uploads the `.tar.gz` archive to the GitHub release
-- publishes the same archive to the Nextcloud App Store
+- publishes the same archive to the Nextcloud App Store without marking
+  semver pre-releases as nightly builds
 
 Configure these GitHub Actions secrets before publishing a release:
 

@@ -10,7 +10,6 @@ permissions:
 
 env:
   APP_ID: nextcloud_migrate
-  NEXTCLOUD_VERSION: stable31
 
 jobs:
   build_and_publish:
@@ -20,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@5a4ac9002d0be2fb38bd78e4b4dbde5606d7042f
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
 
       - name: Set up PHP
         uses: shivammathur/setup-php@afefcaf556d98dc7896cca380e181decb609ca44
@@ -29,10 +28,23 @@ jobs:
           coverage: none
 
       - name: Set up Node.js
-        uses: actions/setup-node@64ed1bf0c8bb7e5f43ba4fd304667d43d5e1f349
+        uses: actions/setup-node@e51e5fe84fc33b4c73ebe40526b2694712b5b858
         with:
           node-version: "22"
           cache: npm
+
+      - name: Determine supported Nextcloud release branch
+        run: |
+          set -euo pipefail
+
+          nextcloud_max_version="$(sed -n 's:.*<nextcloud[^>]*max-version="\([0-9][0-9]*\)".*:\1:p' appinfo/info.xml | head -n1)"
+
+          if [ -z "$nextcloud_max_version" ]; then
+            echo "Unable to determine the supported Nextcloud max-version from appinfo/info.xml." >&2
+            exit 1
+          fi
+
+          echo "NEXTCLOUD_VERSION=stable${nextcloud_max_version}" >> "$GITHUB_ENV"
 
       - name: Set up Nextcloud server
         uses: SMillerDev/nextcloud-actions/setup-nextcloud@a1964c2cf903781e17b965a0938a70c694379c42
@@ -109,13 +121,7 @@ jobs:
           rm -rf "$build_root" "$archive_path"
           mkdir -p "$release_dir"
 
-          rsync -a \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='node_modules/' \
-            --exclude='tests/' \
-            --exclude='vendor/' \
-            "$GITHUB_WORKSPACE/" "$release_dir/"
+          rsync -a --exclude-from="$GITHUB_WORKSPACE/.distignore" "$GITHUB_WORKSPACE/" "$release_dir/"
 
           composer install \
             --working-dir="$release_dir" \
@@ -127,12 +133,7 @@ jobs:
 
           rm -f \
             "$release_dir/composer.json" \
-            "$release_dir/composer.lock" \
-            "$release_dir/package.json" \
-            "$release_dir/package-lock.json" \
-            "$release_dir/phpunit.xml.dist" \
-            "$release_dir/webpack.config.js"
-          rm -rf "$release_dir/src"
+            "$release_dir/composer.lock"
           rm -f "$release_dir/appinfo/signature.json"
 
           php "$GITHUB_WORKSPACE/../server/occ" integrity:sign-app \
@@ -159,7 +160,7 @@ jobs:
           appstore_token: ${{ secrets.APPSTORE_TOKEN }}
           download_url: ${{ steps.upload_release_asset.outputs.browser_download_url }}
           app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
-          nightly: ${{ github.event.release.prerelease }}
+          nightly: false
 
       - name: Remove signing material
         if: always()
