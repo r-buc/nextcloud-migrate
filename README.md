@@ -129,6 +129,17 @@ ACLs.
   queryable in the app's own DB and mirroring every one would just add
   noise to the server log at migration scale. Transient (still-retryable)
   failures are logged too, at `debug` severity.
+- **Finishing a run**: while active, the admin UI's action button reads
+  "Cancel" (`POST .../cancel`). Once a run reaches a state where nothing
+  more will happen to it on its own (completed, completed with errors,
+  failed, cancelled, or validation failed), the SAME button switches to
+  "Done" and instead permanently deletes the run - `DELETE /runs/{id}`
+  (`RunOrchestrator::deleteRun()`) removes its mapped users, discovered
+  files, and audit events, refusing with a 409 if the run somehow isn't
+  actually finished yet. This clears a finished run out of the way so
+  `GET /runs` (and therefore the admin page, which always shows only the
+  latest/current run) goes back to the create-a-migration form on the next
+  load, rather than re-showing the same old finished run indefinitely.
 - **v1 simplification**: one target instance and one current run per admin
   (no multi-instance/multi-run list UI) - re-saving the instance form
   updates the same row, and the admin settings page shows only the

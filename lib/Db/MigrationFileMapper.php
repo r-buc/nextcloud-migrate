@@ -391,4 +391,14 @@ class MigrationFileMapper extends QBMapper {
 			throw $e;
 		}
 	}
+
+	/**
+	 * @throws Exception
+	 */
+	public function deleteByRun(int $runId): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)));
+		$qb->executeStatement();
+	}
 }

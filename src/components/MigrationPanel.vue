@@ -157,7 +157,10 @@
 			</div>
 
 			<div class="ncm-actions">
-				<NcButton :disabled="cancelling" @click="cancel">
+				<NcButton v-if="isDone" variant="primary" :disabled="cancelling" @click="closeRun">
+					Done
+				</NcButton>
+				<NcButton v-else :disabled="cancelling" @click="cancel">
 					Cancel
 				</NcButton>
 				<NcButton variant="tertiary" @click="showAdvanced = !showAdvanced">
@@ -262,6 +265,12 @@ export default {
 	computed: {
 		stateLabel() {
 			return (this.run && STATE_LABELS[this.run.state]) || (this.run && this.run.state) || ''
+		},
+		// Nothing will ever happen to the run on its own past these states
+		// (mirrors POLL_STOP_STATES) - once here, "Cancel" no longer makes
+		// sense, so the button becomes "Done" and removes the run instead.
+		isDone() {
+			return !!this.run && POLL_STOP_STATES.includes(this.run.state)
 		},
 	},
 	mounted() {
@@ -413,6 +422,23 @@ export default {
 				.finally(() => {
 					this.cancelling = false
 					this.resetToCreateForm()
+				})
+		},
+		closeRun() {
+			if (!this.run) {
+				this.resetToCreateForm()
+				return
+			}
+			this.cancelling = true
+			api.delete(`/runs/${this.run.id}`)
+				.then(() => {
+					this.resetToCreateForm()
+				})
+				.catch((e) => {
+					this.errorText = `Failed to remove run: ${apiErrorMessage(e)}`
+				})
+				.finally(() => {
+					this.cancelling = false
 				})
 		},
 		resetToCreateForm() {

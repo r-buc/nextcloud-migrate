@@ -293,6 +293,26 @@ class MigrationController extends Controller {
 		return new JSONResponse($run);
 	}
 
+	/**
+	 * Permanently removes a finished run and everything recorded for it.
+	 * Only allowed once the run has reached a state where nothing more will
+	 * happen to it on its own (see RunOrchestrator::deleteRun()).
+	 */
+	public function deleteRun(int $runId): JSONResponse {
+		$run = $this->ownedRun($runId);
+		if ($run instanceof JSONResponse) {
+			return $run;
+		}
+
+		try {
+			$this->runOrchestrator->deleteRun($runId);
+		} catch (\RuntimeException $e) {
+			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_CONFLICT);
+		}
+
+		return new JSONResponse([], Http::STATUS_NO_CONTENT);
+	}
+
 	private function currentUserId(): string {
 		return $this->userSession->getUser()?->getUID() ?? throw new \RuntimeException('No authenticated user');
 	}

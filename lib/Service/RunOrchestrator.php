@@ -506,6 +506,35 @@ class RunOrchestrator {
 	}
 
 	/**
+	 * Permanently removes a finished run and everything recorded for it
+	 * (mapped users, discovered files, audit events) - used by the admin UI
+	 * once a run reaches a state where nothing more will ever happen to it
+	 * on its own, to clear it out of the way for a new migration. Only
+	 * allowed from a state where no background job could still be
+	 * referencing this run (an active run must be cancelled first).
+	 *
+	 * @throws \RuntimeException if the run is still active
+	 */
+	public function deleteRun(int $runId): void {
+		$run = $this->runMapper->find($runId);
+		$doneStates = [
+			MigrationRun::STATE_COMPLETED,
+			MigrationRun::STATE_COMPLETED_WITH_ERRORS,
+			MigrationRun::STATE_CANCELLED,
+			MigrationRun::STATE_FAILED,
+			MigrationRun::STATE_VALIDATION_FAILED,
+		];
+		if (!in_array($run->getState(), $doneStates, true)) {
+			throw new \RuntimeException("Run cannot be deleted from state '{$run->getState()}' - cancel it first");
+		}
+
+		$this->fileMapper->deleteByRun($runId);
+		$this->userMapMapper->deleteByRun($runId);
+		$this->eventLogger->deleteRunEvents($runId);
+		$this->runMapper->delete($run);
+	}
+
+	/**
 	 * @throws DoesNotExistException
 	 */
 	public function getRun(int $runId): MigrationRun {

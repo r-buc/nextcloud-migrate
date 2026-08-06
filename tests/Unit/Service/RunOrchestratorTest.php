@@ -152,6 +152,27 @@ final class RunOrchestratorTest extends TestCase {
 		self::assertSame(MigrationRun::STATE_CANCELLED, $run->getState());
 	}
 
+	public function testDeleteRunRejectsActiveRun(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_TRANSFERRING));
+
+		$this->fileMapper->expects($this->never())->method('deleteByRun');
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->deleteRun(42);
+	}
+
+	public function testDeleteRunSucceedsFromCompletedState(): void {
+		$run = $this->makeRun(MigrationRun::STATE_COMPLETED);
+		$this->runMapper->method('find')->willReturn($run);
+
+		$this->fileMapper->expects($this->once())->method('deleteByRun')->with(42);
+		$this->userMapMapper->expects($this->once())->method('deleteByRun')->with(42);
+		$this->eventLogger->expects($this->once())->method('deleteRunEvents')->with(42);
+		$this->runMapper->expects($this->once())->method('delete')->with($run);
+
+		$this->orchestrator->deleteRun(42);
+	}
+
 	public function testResumeRunRejectsNonPausedRun(): void {
 		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_TRANSFERRING));
 

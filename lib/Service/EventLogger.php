@@ -63,4 +63,12 @@ class EventLogger {
 			default => $this->logger->info($logMessage, $context),
 		};
 	}
+
+	/**
+	 * Deletes every event recorded for a run - used when an admin removes a
+	 * finished run's data entirely (see RunOrchestrator::deleteRun()).
+	 */
+	public function deleteRunEvents(int $runId): void {
+		$this->eventMapper->deleteByRun($runId);
+	}
 }

@@ -29,6 +29,7 @@ return [
         ['name' => 'migration#pauseRun', 'url' => '/api/v1/runs/{runId}/pause', 'verb' => 'POST'],
         ['name' => 'migration#resumeRun', 'url' => '/api/v1/runs/{runId}/resume', 'verb' => 'POST'],
         ['name' => 'migration#cancelRun', 'url' => '/api/v1/runs/{runId}/cancel', 'verb' => 'POST'],
+        ['name' => 'migration#deleteRun', 'url' => '/api/v1/runs/{runId}', 'verb' => 'DELETE'],
 
         // Status / reporting
         ['name' => 'status#runStatus', 'url' => '/api/v1/runs/{runId}/status', 'verb' => 'GET'],
