@@ -102,6 +102,57 @@ final class MappingServiceTest extends TestCase {
 		self::assertSame('Documents/report.pdf', $file->getTargetPath());
 	}
 
+	public function testOverwriteIfNewerStrategyOverwritesWhenSourceIsNewer(): void {
+		$file = $this->makeFile('Documents/report.pdf');
+		$file->setMtime(2000);
+		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null, 'mtime' => 1000]);
+
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE_IF_NEWER);
+
+		self::assertSame(MigrationFile::STATE_MAPPED, $file->getState());
+		self::assertSame('Documents/report.pdf', $file->getTargetPath());
+	}
+
+	public function testOverwriteIfNewerStrategySkipsWhenSourceIsOlder(): void {
+		$file = $this->makeFile('Documents/report.pdf');
+		$file->setMtime(1000);
+		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null, 'mtime' => 2000]);
+
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE_IF_NEWER);
+
+		self::assertSame(MigrationFile::STATE_SKIPPED, $file->getState());
+		self::assertNull($file->getTargetPath());
+	}
+
+	public function testOverwriteIfNewerStrategySkipsWhenMtimesAreEqual(): void {
+		$file = $this->makeFile('Documents/report.pdf');
+		$file->setMtime(1000);
+		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null, 'mtime' => 1000]);
+
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE_IF_NEWER);
+
+		self::assertSame(MigrationFile::STATE_SKIPPED, $file->getState());
+	}
+
+	public function testOverwriteIfNewerStrategySkipsWhenTargetMtimeIsUnknown(): void {
+		$file = $this->makeFile('Documents/report.pdf');
+		$file->setMtime(2000);
+		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null, 'mtime' => null]);
+
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE_IF_NEWER);
+
+		self::assertSame(MigrationFile::STATE_SKIPPED, $file->getState());
+	}
+
+	public function testOverwriteIfNewerStrategySkipsWhenSourceMtimeIsUnknown(): void {
+		$file = $this->makeFile('Documents/report.pdf');
+		$this->webDavClient->method('stat')->willReturn(['size' => 1, 'etag' => 'x', 'checksum' => null, 'mtime' => 1000]);
+
+		$this->mappingService->mapFile($file, new RemoteInstance(), 'targetuser', 'secret', MappingService::STRATEGY_OVERWRITE_IF_NEWER);
+
+		self::assertSame(MigrationFile::STATE_SKIPPED, $file->getState());
+	}
+
 	public function testUnknownCollisionStrategyThrows(): void {
 		$file = $this->makeFile('Documents/report.pdf');
 

@@ -19,8 +19,15 @@ class MappingService {
 	public const STRATEGY_RENAME = 'rename';
 	public const STRATEGY_SKIP = 'skip';
 	public const STRATEGY_OVERWRITE = 'overwrite';
+	// Only overwrites the target if the source file's mtime is strictly
+	// newer than the target's; otherwise behaves like STRATEGY_SKIP. Lets a
+	// migration be re-run repeatedly (e.g. after fixing a batch of source-side
+	// issues) without clobbering target files that already match or are
+	// ahead of the source, while still picking up files that changed since
+	// the last run.
+	public const STRATEGY_OVERWRITE_IF_NEWER = 'overwrite_newer';
 
-	public const STRATEGIES = [self::STRATEGY_RENAME, self::STRATEGY_SKIP, self::STRATEGY_OVERWRITE];
+	public const STRATEGIES = [self::STRATEGY_RENAME, self::STRATEGY_SKIP, self::STRATEGY_OVERWRITE, self::STRATEGY_OVERWRITE_IF_NEWER];
 
 	public function __construct(
 		private WebDavClient $webDavClient,
@@ -92,6 +99,16 @@ class MappingService {
 				$file->setState(MigrationFile::STATE_MAPPED);
 				break;
 
+			case self::STRATEGY_OVERWRITE_IF_NEWER:
+				if ($this->isSourceNewer($file, $existing)) {
+					$file->setTargetPath($file->getSourcePath());
+					$file->setState(MigrationFile::STATE_MAPPED);
+				} else {
+					$file->setState(MigrationFile::STATE_SKIPPED);
+					$file->setLastError('Skipped: target already exists and is not older than the source');
+				}
+				break;
+
 			case self::STRATEGY_RENAME:
 			default:
 				$file->setTargetPath($this->renamedPath($file->getSourcePath()));
@@ -101,6 +118,28 @@ class MappingService {
 
 		$file->setUpdatedAt($now);
 		$this->fileMapper->update($file);
+	}
+
+	/**
+	 * True only when both the source's discovered mtime and the target's
+	 * PROPFIND-reported mtime are known and the source is strictly newer.
+	 * Either side being unknown (e.g. the target server didn't return
+	 * d:getlastmodified, or discovery somehow left mtime unset) is treated
+	 * conservatively as "not newer" - skipping is always safe, whereas
+	 * guessing wrong and overwriting could clobber data we can't prove is
+	 * actually older.
+	 *
+	 * @param array{size:int,etag:?string,checksum:?string,mtime:?int} $existing
+	 */
+	private function isSourceNewer(MigrationFile $file, array $existing): bool {
+		$sourceMtime = $file->getMtime();
+		$targetMtime = $existing['mtime'] ?? null;
+
+		if ($sourceMtime === null || $targetMtime === null) {
+			return false;
+		}
+
+		return $sourceMtime > $targetMtime;
 	}
 
 	private function renamedPath(string $path): string {

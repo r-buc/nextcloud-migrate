@@ -116,7 +116,12 @@ ACLs.
 - **Collision handling**: resolved inline per-file during transfer
   (`MappingService`), not as a separate bulk pre-pass, to avoid an extra
   PROPFIND round trip per file. Strategies: `rename` (default), `skip`,
-  `overwrite`.
+  `overwrite` (always overwrite the target), `overwrite_newer` (overwrite
+  only when the source file's mtime is strictly newer than the target's
+  PROPFIND-reported mtime, else skip - lets a migration be safely re-run
+  against a target that already has some/all files, without clobbering
+  target files that are already up to date or ahead of the source; if
+  either mtime is unknown it conservatively skips rather than guesses).
 - **Post-transfer verification (optional)**: every upload already includes
   an `OC-Checksum` header (see `TransferService`/`WebDavClient`), which
   Nextcloud's DAV server validates against the received bytes and rejects

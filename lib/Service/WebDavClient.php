@@ -104,8 +104,8 @@ class WebDavClient {
 	}
 
 	/**
-	 * @return array{size:int,etag:?string,checksum:?string}|null null if the
-	 *         remote path does not exist
+	 * @return array{size:int,etag:?string,checksum:?string,mtime:?int}|null
+	 *         null if the remote path does not exist
 	 * @throws RemoteConnectionException
 	 */
 	public function stat(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path): ?array {
@@ -370,7 +370,7 @@ class WebDavClient {
 	}
 
 	/**
-	 * @return array{size:int,etag:?string,checksum:?string}
+	 * @return array{size:int,etag:?string,checksum:?string,mtime:?int}
 	 * @throws RemoteConnectionException
 	 */
 	private function propfind(RemoteInstance $instance, string $targetUserId, string $appPassword, string $path, int $depth): array {
@@ -382,6 +382,7 @@ class WebDavClient {
   <d:prop>
     <d:getcontentlength/>
     <d:getetag/>
+    <d:getlastmodified/>
     <oc:checksums/>
     <oc:size/>
   </d:prop>
@@ -404,12 +405,13 @@ XML;
 	}
 
 	/**
-	 * @return array{size:int,etag:?string,checksum:?string}
+	 * @return array{size:int,etag:?string,checksum:?string,mtime:?int}
 	 */
 	private function parsePropfindResponse(string $xml): array {
 		$size = 0;
 		$etag = null;
 		$checksum = null;
+		$mtime = null;
 
 		try {
 			$doc = new \SimpleXMLElement($xml);
@@ -426,6 +428,14 @@ XML;
 				$etag = trim((string)$etagNodes[0], '"');
 			}
 
+			// RFC 1123 (e.g. "Thu, 07 Aug 2026 12:00:00 GMT") - what Nextcloud's
+			// DAV server reports for d:getlastmodified.
+			$mtimeNodes = $doc->xpath('//d:prop/d:getlastmodified');
+			if (!empty($mtimeNodes)) {
+				$parsed = strtotime((string)$mtimeNodes[0]);
+				$mtime = $parsed !== false ? $parsed : null;
+			}
+
 			$checksumNodes = $doc->xpath('//d:prop/oc:checksums/oc:checksum');
 			if (!empty($checksumNodes)) {
 				foreach ($checksumNodes as $node) {
@@ -439,7 +449,7 @@ XML;
 			$this->logger->warning('Failed to parse PROPFIND response', ['exception' => $e]);
 		}
 
-		return ['size' => $size, 'etag' => $etag, 'checksum' => $checksum];
+		return ['size' => $size, 'etag' => $etag, 'checksum' => $checksum, 'mtime' => $mtime];
 	}
 
 	private function buildUri(RemoteInstance $instance, string $targetUserId, string $path): string {

@@ -21,7 +21,10 @@
 						Skip on collision
 					</option>
 					<option value="overwrite">
-						Overwrite on collision
+						Always overwrite on collision
+					</option>
+					<option value="overwrite_newer">
+						Overwrite only if source is newer (else skip)
 					</option>
 				</select>
 			</div>
