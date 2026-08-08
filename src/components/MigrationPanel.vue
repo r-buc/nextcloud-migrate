@@ -159,6 +159,13 @@
 						</tr>
 					</tbody>
 				</table>
+
+				<p v-if="showFailures" class="settings-hint">
+					<span>Showing {{ failures.length }} of {{ status.run.failedFiles }} failed file(s).</span>
+					<NcButton v-if="hasMoreFailures" variant="tertiary" :disabled="loadingFailures" @click="loadMoreFailures">
+						Load more
+					</NcButton>
+				</p>
 			</div>
 
 			<div class="ncm-actions">
@@ -236,6 +243,11 @@ const FAILURE_STAGE_LABELS = {
 	verification_failed: 'Verification',
 }
 
+// Failed-files list is paginated (a run can have thousands of failures) -
+// this is the max the server allows per request (see
+// StatusController::runFailures()).
+const FAILURES_PAGE_SIZE = 500
+
 export default {
 	name: 'MigrationPanel',
 	components: { NcButton, NcCheckboxRadioSwitch, NcNoteCard, NcProgressBar },
@@ -264,6 +276,7 @@ export default {
 			autoAdvanced: {},
 			showFailures: false,
 			failures: [],
+			failuresOffset: 0,
 			loadingFailures: false,
 			retrying: false,
 		}
@@ -271,6 +284,14 @@ export default {
 	computed: {
 		stateLabel() {
 			return (this.run && STATE_LABELS[this.run.state]) || (this.run && this.run.state) || ''
+		},
+		// The failed-files list is paginated (FAILURES_PAGE_SIZE per request,
+		// server-capped at 500 regardless) since a run can have thousands of
+		// failures - comparing against the live failedFiles count (rather than
+		// just "did the last page come back full") stays correct even if more
+		// files fail while the list is open.
+		hasMoreFailures() {
+			return !!this.status && this.failures.length < this.status.run.failedFiles
 		},
 		// Nothing will ever happen to the run on its own past these states
 		// (mirrors POLL_STOP_STATES) - once here, "Cancel" no longer makes
@@ -375,12 +396,13 @@ export default {
 				if (POLL_STOP_STATES.includes(status.run.state)) {
 					this.stopPolling()
 				}
-				// Keep an already-open failed-files list live too, since
-				// more files can fail (or exhaust their retries) between
-				// poll ticks.
-				if (this.showFailures) {
-					this.loadFailures()
-				}
+				// Not auto-refreshing an already-open failed-files list
+				// here (unlike the rest of the status view): with
+				// potentially thousands of entries the list is paginated
+				// (see loadMoreFailures()), and reloading on every poll
+				// tick would keep resetting that pagination progress.
+				// Toggling the list closed and open again fetches current
+				// data from the start if needed.
 			})
 		},
 		// Kicks off discovery as soon as a run is created, and transfer as
@@ -446,6 +468,7 @@ export default {
 					this.run = run
 					this.showFailures = false
 					this.failures = []
+					this.failuresOffset = 0
 					this.startPolling()
 					this.refreshStatus()
 				})
@@ -480,6 +503,7 @@ export default {
 			this.showAdvanced = false
 			this.showFailures = false
 			this.failures = []
+			this.failuresOffset = 0
 			this.errorText = ''
 			this.loadLocalUsers()
 		},
@@ -505,10 +529,22 @@ export default {
 			if (!this.run) {
 				return
 			}
+			this.failures = []
+			this.failuresOffset = 0
+			return this.fetchFailuresPage()
+		},
+		loadMoreFailures() {
+			return this.fetchFailuresPage()
+		},
+		fetchFailuresPage() {
+			if (!this.run) {
+				return
+			}
 			this.loadingFailures = true
-			return api.get(`/runs/${this.run.id}/failures?limit=200`)
+			return api.get(`/runs/${this.run.id}/failures?limit=${FAILURES_PAGE_SIZE}&offset=${this.failuresOffset}`)
 				.then((files) => {
-					this.failures = files
+					this.failures = this.failures.concat(files)
+					this.failuresOffset += files.length
 				})
 				.catch((e) => {
 					this.errorText = `Failed to load failed files: ${apiErrorMessage(e)}`
