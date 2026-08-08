@@ -163,12 +163,15 @@
 					</tbody>
 				</table>
 
-				<p v-if="showFailures" class="settings-hint">
-					<span>Showing {{ failures.length }} of {{ status.run.failedFiles }} failed file(s).</span>
-					<NcButton v-if="hasMoreFailures" variant="tertiary" :disabled="loadingFailures" @click="loadMoreFailures">
-						Load more
+				<div v-if="showFailures" class="ncm-failures-pagination">
+					<span class="settings-hint">Page {{ failuresPage }} of {{ totalFailuresPages }} ({{ status.run.failedFiles }} failed file(s) total)</span>
+					<NcButton variant="tertiary" :disabled="loadingFailures || failuresPage <= 1" @click="prevFailuresPage">
+						Previous
 					</NcButton>
-				</p>
+					<NcButton variant="tertiary" :disabled="loadingFailures || failuresPage >= totalFailuresPages" @click="nextFailuresPage">
+						Next
+					</NcButton>
+				</div>
 			</div>
 
 			<div class="ncm-actions">
@@ -246,10 +249,11 @@ const FAILURE_STAGE_LABELS = {
 	verification_failed: 'Verification',
 }
 
-// Failed-files list is paginated (a run can have thousands of failures) -
-// this is the max the server allows per request (see
-// StatusController::runFailures()).
-const FAILURES_PAGE_SIZE = 500
+// Failed-files list is paginated (a run can have thousands of failures),
+// shown 20 at a time with page navigation rather than an ever-growing
+// "load more" list. The server allows up to 500 per request (see
+// StatusController::runFailures()) - well above what's needed here.
+const FAILURES_PAGE_SIZE = 20
 
 export default {
 	name: 'MigrationPanel',
@@ -279,7 +283,7 @@ export default {
 			autoAdvanced: {},
 			showFailures: false,
 			failures: [],
-			failuresOffset: 0,
+			failuresPage: 1,
 			loadingFailures: false,
 			retrying: false,
 		}
@@ -288,13 +292,16 @@ export default {
 		stateLabel() {
 			return (this.run && STATE_LABELS[this.run.state]) || (this.run && this.run.state) || ''
 		},
-		// The failed-files list is paginated (FAILURES_PAGE_SIZE per request,
-		// server-capped at 500 regardless) since a run can have thousands of
-		// failures - comparing against the live failedFiles count (rather than
-		// just "did the last page come back full") stays correct even if more
-		// files fail while the list is open.
-		hasMoreFailures() {
-			return !!this.status && this.failures.length < this.status.run.failedFiles
+		// Total pages for the failed-files list, derived from the live
+		// failedFiles count (rather than a snapshot taken when the list was
+		// opened) so it stays correct even if more files fail while the list
+		// is open - though the currently-viewed page's contents only refresh
+		// when explicitly navigated (see refreshStatus()).
+		totalFailuresPages() {
+			if (!this.status || this.status.run.failedFiles <= 0) {
+				return 1
+			}
+			return Math.max(1, Math.ceil(this.status.run.failedFiles / FAILURES_PAGE_SIZE))
 		},
 		// Nothing will ever happen to the run on its own past these states
 		// (mirrors POLL_STOP_STATES) - once here, "Cancel" no longer makes
@@ -402,10 +409,11 @@ export default {
 				// Not auto-refreshing an already-open failed-files list
 				// here (unlike the rest of the status view): with
 				// potentially thousands of entries the list is paginated
-				// (see loadMoreFailures()), and reloading on every poll
-				// tick would keep resetting that pagination progress.
-				// Toggling the list closed and open again fetches current
-				// data from the start if needed.
+				// (see fetchFailuresPage()), and reloading on every poll
+				// tick would jump the admin back to a stale view of
+				// whichever page they're currently looking at. Toggling
+				// the list closed and open again, or navigating pages,
+				// fetches current data.
 			})
 		},
 		// Kicks off discovery as soon as a run is created, and transfer as
@@ -471,7 +479,7 @@ export default {
 					this.run = run
 					this.showFailures = false
 					this.failures = []
-					this.failuresOffset = 0
+					this.failuresPage = 1
 					this.startPolling()
 					this.refreshStatus()
 				})
@@ -506,7 +514,7 @@ export default {
 			this.showAdvanced = false
 			this.showFailures = false
 			this.failures = []
-			this.failuresOffset = 0
+			this.failuresPage = 1
 			this.errorText = ''
 			this.loadLocalUsers()
 		},
@@ -533,10 +541,21 @@ export default {
 				return
 			}
 			this.failures = []
-			this.failuresOffset = 0
+			this.failuresPage = 1
 			return this.fetchFailuresPage()
 		},
-		loadMoreFailures() {
+		prevFailuresPage() {
+			if (this.failuresPage <= 1) {
+				return
+			}
+			this.failuresPage -= 1
+			return this.fetchFailuresPage()
+		},
+		nextFailuresPage() {
+			if (this.failuresPage >= this.totalFailuresPages) {
+				return
+			}
+			this.failuresPage += 1
 			return this.fetchFailuresPage()
 		},
 		fetchFailuresPage() {
@@ -544,10 +563,10 @@ export default {
 				return
 			}
 			this.loadingFailures = true
-			return api.get(`/runs/${this.run.id}/failures?limit=${FAILURES_PAGE_SIZE}&offset=${this.failuresOffset}`)
+			const offset = (this.failuresPage - 1) * FAILURES_PAGE_SIZE
+			return api.get(`/runs/${this.run.id}/failures?limit=${FAILURES_PAGE_SIZE}&offset=${offset}`)
 				.then((files) => {
-					this.failures = this.failures.concat(files)
-					this.failuresOffset += files.length
+					this.failures = files
 				})
 				.catch((e) => {
 					this.errorText = `Failed to load failed files: ${apiErrorMessage(e)}`
@@ -638,6 +657,13 @@ export default {
 .ncm-failures-table {
 	width: 100%;
 	max-width: 900px;
+	margin-top: 8px;
+}
+
+.ncm-failures-pagination {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	margin-top: 8px;
 }
 
