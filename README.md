@@ -18,10 +18,9 @@ ACLs.
   `oc_storages`/`oc_filecache`/`oc_mimetypes` queries) rather than walking
   the tree via the Files API - fast even at 100k-file scale, `ORDER BY
   path` gives parent-before-child ordering "for free" (ideal for
-  in-order remote folder creation), and it lets currently-encrypted files
-  be excluded automatically at the SQL level (see "Leftover server-side
-  encryption" below). Only the TARGET instance is reached over the
-  network, via WebDAV.
+  in-order remote folder creation), and it lets encrypted files be
+  excluded automatically at the SQL level (see "Encrypted files" below).
+  Only the TARGET instance is reached over the network, via WebDAV.
 - **Credentials (important)**: Nextcloud's WebDAV auth backend rewrites the
   DAV principal to whichever user actually authenticates - there is no
   admin-bypass for writing into a different user's files. So the single
@@ -51,25 +50,19 @@ ACLs.
   Opt-in continuous sync (see "Continuous sync" below) lifts this
   limitation for as long as it stays enabled, by periodically re-scanning
   for exactly such post-verification edits.
-- **Leftover server-side encryption**: if the source instance ever had
-  Nextcloud's own server-side encryption enabled and later disabled it
-  *without* first running `occ encryption:decrypt-all`, those older files
-  stay physically encrypted on disk - and once the encryption app is off,
-  the standard Files API's decrypt-on-read no longer applies to them, so
-  reading one would return raw ciphertext starting with Nextcloud's own
-  encryption header (`HBEGIN:oc_encryption_module:...`, see
-  `\OC\Encryption\Util`) instead of the real content. Rather than
-  detecting this at transfer time, discovery (`FilecacheReader`) excludes
-  such files up front by querying the filecache's own `encrypted` column
-  directly - they're never turned into a `migrate_files` row at all, so
-  nothing ever tries to read/upload the raw ciphertext. This is otherwise
+- **Encrypted files**: a file still server-side encrypted on the source
+  (see "Out of scope" below - encryption keys are instance-specific, so an
+  encrypted file can't be transferred meaningfully regardless of why it's
+  encrypted) is excluded automatically at discovery by querying the
+  filecache's own `encrypted` column directly (`FilecacheReader`) - it's
+  never turned into a `migrate_files` row at all. This is otherwise
   invisible (there's no failed-file row to see), so a
   `source_files_excluded_encrypted` run event is logged with the affected
   count whenever discovery finds any, so an admin isn't left wondering why
-  the numbers don't match what's on disk. Fix on the source instance:
-  re-enable the encryption app and run `occ encryption:decrypt-all`, then
-  retry discovery (re-run the dry run, or - for continuous sync - wait for
-  the next scan) to pick the now-decrypted files up.
+  the numbers don't match what's on disk. To include such files, decrypt
+  them on the source first (`occ encryption:decrypt-all`), then retry
+  discovery (re-run the dry run, or - for continuous sync - wait for the
+  next scan).
 - **Stale source filecache metadata**: separately, the torn-read guard
   above also compares the number of bytes *actually read* against the
   file's reported `getSize()` - even when mtime/size report completely
@@ -305,7 +298,9 @@ and runs (`created_by` ownership check). See `appinfo/routes.php`.
 - **Shares/permissions**: requires OCS share API round trips per file and
   user-mapping resolution; deferred to keep v1 focused on file fidelity.
 - **Versions**: tied to source file IDs; not portable 1:1 across instances.
-- **Encrypted files**: server-side encryption keys are instance-specific.
+- **Encrypted files**: server-side encryption keys are instance-specific,
+  so an encrypted file can't be transferred meaningfully - excluded
+  automatically at discovery (see "Encrypted files" under Architecture).
 - **Federated shares/ACLs**: require cross-instance trust setup out of scope
   for a one-shot migration tool.
 
