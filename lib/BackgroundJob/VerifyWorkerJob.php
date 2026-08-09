@@ -102,7 +102,11 @@ class VerifyWorkerJob extends QueuedJob {
 				return;
 			}
 
-			if ($run->getState() !== MigrationRun::STATE_VERIFYING) {
+			// SYNCING included: continuous sync (see
+			// RunOrchestrator::onUserTransferComplete()) chains straight into
+			// verifying a user's newly-transferred files without the run
+			// ever leaving MigrationRun::STATE_SYNCING.
+			if (!in_array($run->getState(), [MigrationRun::STATE_VERIFYING, MigrationRun::STATE_SYNCING], true)) {
 				return;
 			}
 

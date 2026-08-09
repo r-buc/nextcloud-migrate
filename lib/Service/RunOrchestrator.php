@@ -7,6 +7,7 @@ namespace OCA\NextcloudMigrate\Service;
 use OCA\NextcloudMigrate\BackgroundJob\DiscoveryJob;
 use OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob;
 use OCA\NextcloudMigrate\BackgroundJob\FinalizeJob;
+use OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob;
 use OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
@@ -35,6 +36,8 @@ use OCA\NextcloudMigrate\Util\UuidGenerator;
  *   Any of VALIDATING/APPROVED/TRANSFERRING/VERIFYING -> VALIDATION_FAILED | FAILED
  *   Any active state -> PAUSED -> (resume) back to its prior active state
  *   Any non-terminal state -> CANCELLED
+ *   COMPLETED | COMPLETED_WITH_ERRORS -> SYNCING (startSyncing(), 'overwrite_newer'
+ *     collision strategy only) -> (stopSyncing()) -> COMPLETED | COMPLETED_WITH_ERRORS
  */
 class RunOrchestrator {
 	// How long a single TransferWorkerJob/VerifyWorkerJob execution keeps
@@ -62,6 +65,7 @@ class RunOrchestrator {
 		private EventLogger $eventLogger,
 		private IJobList $jobList,
 		private IConfig $config,
+		private DiscoveryService $discoveryService,
 	) {
 	}
 
@@ -298,6 +302,17 @@ class RunOrchestrator {
 	 */
 	public function onUserTransferComplete(int $runId, int $userMapId): void {
 		$run = $this->runMapper->find($runId);
+		if ($run->getState() === MigrationRun::STATE_SYNCING) {
+			// No run-level phase transition during continuous sync (the run
+			// just stays SYNCING indefinitely) - but this user's newly
+			// transferred files still need verifying, chained directly
+			// per-user rather than waiting for every mapped user to drain
+			// (there's no "whole run" phase to wait for here).
+			if (!$run->getSkipVerification()) {
+				$this->jobList->add(VerifyWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMapId, 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
+			}
+			return;
+		}
 		if (!in_array($run->getState(), [MigrationRun::STATE_TRANSFERRING, MigrationRun::STATE_APPROVED], true)) {
 			return;
 		}
@@ -411,7 +426,19 @@ class RunOrchestrator {
 
 	public function finalizeRun(int $runId): void {
 		$run = $this->runMapper->find($runId);
-		$counts = $this->fileMapper->countByState($runId);
+		$this->transitionToTerminalState($run);
+
+		$this->eventLogger->log($runId, 'run_finished', "Run finished with state {$run->getState()}");
+	}
+
+	/**
+	 * Shared by finalizeRun() (end of the initial pipeline) and
+	 * stopSyncing() (admin ends continuous sync): recomputes counters from
+	 * current file state and settles the run into COMPLETED or
+	 * COMPLETED_WITH_ERRORS depending on whether any failures remain.
+	 */
+	private function transitionToTerminalState(MigrationRun $run): void {
+		$counts = $this->fileMapper->countByState($run->getId());
 		$this->refreshRunCounters($run, $counts);
 
 		$failedStates = [MigrationFile::STATE_TRANSFER_FAILED, MigrationFile::STATE_VERIFICATION_FAILED, MigrationFile::STATE_MAPPING_FAILED];
@@ -428,8 +455,101 @@ class RunOrchestrator {
 		$run->setFinishedAt(time());
 		$run->setUpdatedAt(time());
 		$this->runMapper->update($run);
+	}
 
-		$this->eventLogger->log($runId, 'run_finished', "Run finished with state {$run->getState()}");
+	/**
+	 * Starts continuous sync: moves a finished run (COMPLETED or
+	 * COMPLETED_WITH_ERRORS) into MigrationRun::STATE_SYNCING, where
+	 * SyncDiscoveryJob periodically re-scans each mapped user's source tree
+	 * for new or changed files and re-runs them through the normal
+	 * transfer/verification pipeline (see runSyncPass()). Only offered for
+	 * the 'overwrite_newer' collision strategy - see
+	 * MappingService::STRATEGY_OVERWRITE_IF_NEWER - since that's the only
+	 * strategy where re-syncing an already-migrated, now-changed file does
+	 * something sensible: 'skip' would never update it again, and 'rename'/
+	 * plain 'overwrite' would either pile up a fresh duplicate or blindly
+	 * overwrite every cycle regardless of which side actually changed.
+	 *
+	 * @throws \RuntimeException if the run hasn't finished, or doesn't use
+	 *         the 'overwrite_newer' collision strategy
+	 */
+	public function startSyncing(int $runId): MigrationRun {
+		$run = $this->runMapper->find($runId);
+		$finishedStates = [MigrationRun::STATE_COMPLETED, MigrationRun::STATE_COMPLETED_WITH_ERRORS];
+		if (!in_array($run->getState(), $finishedStates, true)) {
+			throw new \RuntimeException("Run must have finished to start continuous sync (currently '{$run->getState()}')");
+		}
+		if ($run->getCollisionStrategy() !== MappingService::STRATEGY_OVERWRITE_IF_NEWER) {
+			throw new \RuntimeException("Continuous sync is only available for runs using the '" . MappingService::STRATEGY_OVERWRITE_IF_NEWER . "' collision strategy");
+		}
+
+		$run->setState(MigrationRun::STATE_SYNCING);
+		$run->setUpdatedAt(time());
+		$this->runMapper->update($run);
+
+		$this->eventLogger->log($runId, 'sync_started', 'Admin enabled continuous sync; the source will be periodically re-scanned for new/changed files');
+
+		return $run;
+	}
+
+	/**
+	 * Stops continuous sync: settles the run into COMPLETED or
+	 * COMPLETED_WITH_ERRORS based on current failure counts, same decision
+	 * finalizeRun() makes for the initial pass.
+	 *
+	 * @throws \RuntimeException if the run isn't currently syncing
+	 */
+	public function stopSyncing(int $runId): MigrationRun {
+		$run = $this->runMapper->find($runId);
+		if ($run->getState() !== MigrationRun::STATE_SYNCING) {
+			throw new \RuntimeException("Run is not currently syncing (state '{$run->getState()}')");
+		}
+
+		$this->transitionToTerminalState($run);
+		$this->eventLogger->log($runId, 'sync_stopped', "Admin stopped continuous sync; run finished with state {$run->getState()}");
+
+		return $run;
+	}
+
+	/**
+	 * Called by SyncDiscoveryJob on every tick for each currently-SYNCING
+	 * run: re-discovers each mapped user's tree for new/changed files (see
+	 * DiscoveryService::discoverIncremental()) and spawns a TransferWorkerJob
+	 * for any user with something new to do. A user whose lineage is still
+	 * busy from a previous tick simply gets a redundant spawn that finds
+	 * nothing to claim and exits immediately - harmless, and simpler than
+	 * tracking in-flight lineages across ticks.
+	 */
+	public function runSyncPass(int $runId): void {
+		$run = $this->runMapper->find($runId);
+		if ($run->getState() !== MigrationRun::STATE_SYNCING) {
+			return;
+		}
+
+		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+			if ($userMap->getState() === UserMap::STATE_FAILED) {
+				continue;
+			}
+
+			try {
+				$result = $this->discoveryService->discoverIncremental($runId, $userMap, $userMap->getSourceUserId());
+			} catch (\Throwable $e) {
+				$this->eventLogger->log($runId, 'sync_scan_failed', "Incremental sync scan failed for user '{$userMap->getSourceUserId()}': {$e->getMessage()}", 'error');
+				continue;
+			}
+
+			if ($result['new'] > 0 || $result['changed'] > 0) {
+				$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
+			}
+		}
+
+		$counts = $this->fileMapper->countByState($runId);
+		$run->setTotalFiles(array_sum($counts));
+		$run->setTotalBytes($this->fileMapper->sumDiscoveredBytes($runId));
+		$this->refreshRunCounters($run, $counts);
+		$run->setLastSyncAt(time());
+		$run->setUpdatedAt(time());
+		$this->runMapper->update($run);
 	}
 
 	public function pauseRun(int $runId): MigrationRun {
@@ -503,7 +623,7 @@ class RunOrchestrator {
 	 */
 	public function retryFailures(int $runId): MigrationRun {
 		$run = $this->runMapper->find($runId);
-		$retryableStates = [MigrationRun::STATE_COMPLETED_WITH_ERRORS, MigrationRun::STATE_FAILED];
+		$retryableStates = [MigrationRun::STATE_COMPLETED_WITH_ERRORS, MigrationRun::STATE_FAILED, MigrationRun::STATE_SYNCING];
 		if (!in_array($run->getState(), $retryableStates, true)) {
 			throw new \RuntimeException("Run must have finished with failures to retry failed files (currently '{$run->getState()}')");
 		}
@@ -514,6 +634,19 @@ class RunOrchestrator {
 		}
 
 		$this->eventLogger->log($runId, 'retry_requested', "Admin requested retry of {$resetCount} failed file(s)");
+
+		if ($run->getState() === MigrationRun::STATE_SYNCING) {
+			// Stay in SYNCING throughout - just re-spawn transfer workers for
+			// the affected users rather than routing through the terminal-run
+			// resume/finalize flow below, which doesn't apply here.
+			foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
+				if ($userMap->getState() === UserMap::STATE_FAILED) {
+					continue;
+				}
+				$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
+			}
+			return $run;
+		}
 
 		$run->setState(MigrationRun::STATE_PAUSED);
 		$run->setFinishedAt(null);

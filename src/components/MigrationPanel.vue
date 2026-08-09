@@ -96,6 +96,9 @@
 			<p class="settings-hint">
 				{{ stateLabel }}
 			</p>
+			<p v-if="isSyncing" class="settings-hint">
+				Last scan: {{ run.lastSyncAt ? formatTimestamp(run.lastSyncAt) : 'not run yet' }}. New or changed files are picked up automatically on the next scan.
+			</p>
 			<div class="ncm-progress-row">
 				<NcProgressBar size="medium" :value="status ? status.progressPercent : 0" />
 				<span class="ncm-percent">{{ status ? status.progressPercent : 0 }}%</span>
@@ -175,8 +178,16 @@
 			</div>
 
 			<div class="ncm-actions">
-				<NcButton v-if="isDone" variant="primary" :disabled="cancelling" @click="closeRun">
-					Done
+				<template v-if="isDone">
+					<NcButton v-if="canKeepSyncing" :disabled="cancelling" @click="keepSyncing">
+						Keep in Sync
+					</NcButton>
+					<NcButton variant="primary" :disabled="cancelling" @click="closeRun">
+						Done
+					</NcButton>
+				</template>
+				<NcButton v-else-if="isSyncing" :disabled="cancelling" @click="stopSyncing">
+					Stop
 				</NcButton>
 				<NcButton v-else :disabled="cancelling" @click="cancel">
 					Cancel
@@ -236,6 +247,7 @@ const STATE_LABELS = {
 	failed: 'Failed',
 	paused: 'Paused',
 	cancelled: 'Cancelled',
+	syncing: 'Continuously syncing changes from the source…',
 }
 
 // Friendly labels for a failed file's `state` column (which stage it failed
@@ -308,6 +320,19 @@ export default {
 		// sense, so the button becomes "Done" and removes the run instead.
 		isDone() {
 			return !!this.run && POLL_STOP_STATES.includes(this.run.state)
+		},
+		// Continuous sync steady state (see RunOrchestrator::STATE_SYNCING):
+		// the run keeps running indefinitely, re-scanning the source for
+		// new/changed files, until the admin explicitly stops it.
+		isSyncing() {
+			return !!this.run && this.run.state === 'syncing'
+		},
+		// "Keep in Sync" is only offered once the initial run has finished
+		// AND uses the 'overwrite_newer' collision strategy - that's the only
+		// strategy where re-syncing an already-migrated, now-changed file
+		// does something sensible (see RunOrchestrator::startSyncing()).
+		canKeepSyncing() {
+			return this.isDone && !!this.run && this.run.collisionStrategy === 'overwrite_newer'
 		},
 		// Mirrors the backend's RunOrchestrator::retryFailures() allowed
 		// states - only a run that finished WITH failures can be retried.
@@ -507,6 +532,43 @@ export default {
 					this.cancelling = false
 				})
 		},
+		keepSyncing() {
+			if (!this.run) {
+				return
+			}
+			this.cancelling = true
+			this.errorText = ''
+			api.post(`/runs/${this.run.id}/keep-syncing`)
+				.then((run) => {
+					this.run = run
+					this.startPolling()
+					this.refreshStatus()
+				})
+				.catch((e) => {
+					this.errorText = `Failed to enable continuous sync: ${apiErrorMessage(e)}`
+				})
+				.finally(() => {
+					this.cancelling = false
+				})
+		},
+		stopSyncing() {
+			if (!this.run) {
+				return
+			}
+			this.cancelling = true
+			this.errorText = ''
+			api.post(`/runs/${this.run.id}/stop-syncing`)
+				.then((run) => {
+					this.run = run
+					this.refreshStatus()
+				})
+				.catch((e) => {
+					this.errorText = `Failed to stop continuous sync: ${apiErrorMessage(e)}`
+				})
+				.finally(() => {
+					this.cancelling = false
+				})
+		},
 		resetToCreateForm() {
 			this.stopPolling()
 			this.run = null
@@ -529,6 +591,9 @@ export default {
 			const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
 			const value = bytes / (1024 ** unitIndex)
 			return `${unitIndex === 0 ? value : value.toFixed(1)} ${units[unitIndex]}`
+		},
+		formatTimestamp(unixSeconds) {
+			return new Date(unixSeconds * 1000).toLocaleString()
 		},
 		toggleFailures() {
 			this.showFailures = !this.showFailures

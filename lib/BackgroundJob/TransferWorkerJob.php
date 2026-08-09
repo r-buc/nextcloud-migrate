@@ -108,9 +108,12 @@ class TransferWorkerJob extends QueuedJob {
 				return;
 			}
 
-			if (!in_array($run->getState(), [MigrationRun::STATE_APPROVED, MigrationRun::STATE_TRANSFERRING], true)) {
+			if (!in_array($run->getState(), [MigrationRun::STATE_APPROVED, MigrationRun::STATE_TRANSFERRING, MigrationRun::STATE_SYNCING], true)) {
 				// Paused, cancelled, or already moved past transferring: this
-				// worker lineage stops here (no re-enqueue).
+				// worker lineage stops here (no re-enqueue). SYNCING is
+				// included: continuous sync (see RunOrchestrator::runSyncPass())
+				// spawns this same job to transfer newly-discovered/changed
+				// files without ever moving the run out of SYNCING.
 				return;
 			}
 

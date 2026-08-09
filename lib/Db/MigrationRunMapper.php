@@ -64,4 +64,21 @@ class MigrationRunMapper extends QBMapper {
 
 		return $this->findEntities($qb);
 	}
+
+	/**
+	 * Runs currently in continuous-sync steady state (see
+	 * MigrationRun::STATE_SYNCING) - scanned by SyncDiscoveryJob on every
+	 * tick to re-discover new/changed files for each.
+	 *
+	 * @return MigrationRun[]
+	 * @throws Exception
+	 */
+	public function findSyncing(): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('*')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('state', $qb->createNamedParameter(MigrationRun::STATE_SYNCING)));
+
+		return $this->findEntities($qb);
+	}
 }

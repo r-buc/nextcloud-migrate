@@ -40,9 +40,12 @@ ACLs.
 - **Live source changes**: before/after reading a file, its mtime+size are
   compared (mirroring the desktop client's torn-read guard). A mismatch
   aborts and retries that file rather than uploading inconsistent bytes.
-  This is a point-in-time migration, not continuous sync: edits made only
-  *after* a file has already been verified are not detected or re-migrated.
-  Avoid heavy write activity on the source during a run.
+  A single run is a point-in-time migration by default: edits made only
+  *after* a file has already been verified are not detected or re-migrated
+  during that run. Avoid heavy write activity on the source during a run.
+  Opt-in continuous sync (see "Continuous sync" below) lifts this
+  limitation for as long as it stays enabled, by periodically re-scanning
+  for exactly such post-verification edits.
 - **Leftover server-side encryption**: if the source instance ever had
   Nextcloud's own server-side encryption enabled and later disabled it
   *without* first running `occ encryption:decrypt-all`, those older files
@@ -112,7 +115,9 @@ ACLs.
 - **Run lifecycle**: `CREATED -> VALIDATING -> DISCOVERING -> DRY_RUN_READY
   -> APPROVED -> TRANSFERRING -> VERIFYING -> FINALIZING -> COMPLETED |
   COMPLETED_WITH_ERRORS`, with `PAUSED`/`CANCELLED`/`VALIDATION_FAILED`
-  branches. See `RunOrchestrator` for the full transition graph.
+  branches, plus an optional `COMPLETED | COMPLETED_WITH_ERRORS -> SYNCING
+  -> COMPLETED | COMPLETED_WITH_ERRORS` branch for continuous sync (see
+  below). See `RunOrchestrator` for the full transition graph.
 - **Collision handling**: resolved inline per-file during transfer
   (`MappingService`), not as a separate bulk pre-pass, to avoid an extra
   PROPFIND round trip per file. Strategies: `rename` (default), `skip`,
@@ -122,6 +127,35 @@ ACLs.
   against a target that already has some/all files, without clobbering
   target files that are already up to date or ahead of the source; if
   either mtime is unknown it conservatively skips rather than guesses).
+- **Continuous sync**: once a run using the `overwrite_newer` collision
+  strategy finishes (`COMPLETED`/`COMPLETED_WITH_ERRORS`), the admin UI
+  offers a "Keep in Sync" button alongside "Done" (only for that strategy -
+  it's the only one where re-syncing an already-migrated, now-changed file
+  does something sensible: `skip` would never update it again, and
+  `rename`/plain `overwrite` would either pile up a fresh duplicate or
+  blindly overwrite every cycle regardless of which side actually changed).
+  `POST /runs/{id}/keep-syncing` (`RunOrchestrator::startSyncing()`) moves
+  the run into `SYNCING`, a steady state where `SyncDiscoveryJob` - a
+  periodic job on the same cron tick as `CleanupLocksJob`, no dedicated
+  schedule of its own - re-scans every mapped user's source tree on every
+  run (`DiscoveryService::discoverIncremental()`): a path with no existing
+  row is inserted as a brand new file (going through the normal
+  mapping/collision-check pipeline); an existing row already at
+  `VERIFIED`/`COMPLETED` whose mtime or size no longer matches disk is
+  reset back to `DISCOVERED` (trusting its already-resolved target path
+  rather than re-running collision detection) so it's re-transferred and
+  re-verified. Anything still mid-pipeline or already in a failure state is
+  left alone - a failure surfaces via the normal failed-files list/manual
+  retry, not a silent background reset. **Deletions on the source are not
+  propagated** - a file removed from the source simply stops being visited
+  by future scans and is left untouched on the target (a possible future
+  addition, not implemented yet). While syncing, the admin UI's action
+  button reads "Stop" instead of "Cancel"; `POST /runs/{id}/stop-syncing`
+  (`RunOrchestrator::stopSyncing()`) ends continuous sync and settles the
+  run back into `COMPLETED`/`COMPLETED_WITH_ERRORS` based on current
+  failure counts, same decision `finalizeRun()` makes for the initial pass.
+  "Retry failed files" also works while syncing, re-spawning transfer
+  workers for the affected users without leaving `SYNCING`.
 - **Post-transfer verification (optional)**: every upload already includes
   an `OC-Checksum` header (see `TransferService`/`WebDavClient`), which
   Nextcloud's DAV server validates against the received bytes and rejects

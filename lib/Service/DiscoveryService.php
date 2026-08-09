@@ -43,27 +43,7 @@ class DiscoveryService {
 		$batch = [];
 		$now = time();
 
-		// Iterative DFS (explicit stack) to avoid PHP call-stack recursion
-		// limits on very deep trees.
-		$stack = [$userFolder];
-
-		while ($stack !== []) {
-			/** @var Node $node */
-			$node = array_pop($stack);
-
-			if ($node->getPath() === $userFolder->getPath()) {
-				// Don't create a row for the root folder itself.
-				if ($node instanceof Folder) {
-					foreach ($node->getDirectoryListing() as $child) {
-						$stack[] = $child;
-					}
-				}
-				continue;
-			}
-
-			$relativePath = $this->relativePath($userFolder, $node);
-			$isDirectory = $node instanceof Folder;
-
+		foreach ($this->walk($userFolder) as [$relativePath, $node, $isDirectory]) {
 			$entity = new MigrationFile();
 			$entity->setRunId($runId);
 			$entity->setUserMapId($userMap->getId());
@@ -85,9 +65,6 @@ class DiscoveryService {
 
 			if ($isDirectory) {
 				$stats['folders']++;
-				foreach ($node->getDirectoryListing() as $child) {
-					$stack[] = $child;
-				}
 			} else {
 				$stats['files']++;
 				$stats['bytes'] += $node->getSize();
@@ -109,6 +86,153 @@ class DiscoveryService {
 		]);
 
 		return $stats;
+	}
+
+	/**
+	 * Re-walks a source user's tree for a run already fully discovered
+	 * (and, typically, already transferred/verified once) - used by
+	 * continuous sync (MigrationRun::STATE_SYNCING, see
+	 * RunOrchestrator::runSyncPass()) to pick up files that appeared or
+	 * changed since the last pass:
+	 *  - A path with no existing row for this run+user is a brand new
+	 *    file/folder: inserted exactly like discoverUser() would, so it
+	 *    goes through the normal mapping/transfer/verification pipeline
+	 *    (including the run's own collision strategy, in case something
+	 *    unrelated already occupies that path on the target).
+	 *  - An existing row already at VERIFIED/COMPLETED whose mtime or size
+	 *    no longer matches what's on disk is reset back to DISCOVERED with
+	 *    per-cycle fields cleared and the fresh size/mtime recorded, so it
+	 *    re-enters the pipeline and gets re-transferred. Deliberately only
+	 *    resets rows sitting at VERIFIED/COMPLETED - anything still mid-
+	 *    pipeline or already in a failure state is left alone (a failure
+	 *    is surfaced via the normal failed-files list/manual retry, not
+	 *    silently reset by a background scan).
+	 *  - Deletions on the source are NOT propagated to the target - a
+	 *    disappeared path simply isn't visited by this walk and its row is
+	 *    left exactly as-is. (Not supported yet; see README.)
+	 * Folders are only ever inserted when new (MKCOL is idempotent and
+	 * folders carry no content to "change"), never reset.
+	 *
+	 * @return array{new:int,changed:int}
+	 */
+	public function discoverIncremental(int $runId, UserMap $userMap, string $sourceUserId): array {
+		$userFolder = $this->rootFolder->getUserFolder($sourceUserId);
+
+		$counts = ['new' => 0, 'changed' => 0];
+		$batch = [];
+		$now = time();
+		$resyncableStates = [MigrationFile::STATE_VERIFIED, MigrationFile::STATE_COMPLETED];
+
+		foreach ($this->walk($userFolder) as [$relativePath, $node, $isDirectory]) {
+			$pathHash = hash('sha256', $relativePath);
+			$existing = $this->fileMapper->findByRunAndPathHash($runId, $userMap->getId(), $pathHash);
+
+			if ($existing === null) {
+				$entity = new MigrationFile();
+				$entity->setRunId($runId);
+				$entity->setUserMapId($userMap->getId());
+				$entity->setSourcePath($relativePath);
+				$entity->setSourcePathHash($pathHash);
+				$entity->setSourceFileid($node->getId());
+				$entity->setIsDirectory($isDirectory);
+				$entity->setSize($isDirectory ? 0 : $node->getSize());
+				$entity->setMtime($node->getMTime());
+				$entity->setMimetype($isDirectory ? 'httpd/unix-directory' : $node->getMimetype());
+				$entity->setState(MigrationFile::STATE_DISCOVERED);
+				$entity->setTransferAttempts(0);
+				$entity->setVerifyAttempts(0);
+				$entity->setBytesTransferred(0);
+				$entity->setCreatedAt($now);
+				$entity->setUpdatedAt($now);
+
+				$batch[] = $entity;
+				$counts['new']++;
+
+				if (count($batch) >= self::BATCH_SIZE) {
+					$this->flush($batch);
+					$batch = [];
+				}
+				continue;
+			}
+
+			if ($isDirectory || !in_array($existing->getState(), $resyncableStates, true)) {
+				continue;
+			}
+
+			$sizeChanged = $existing->getSize() !== $node->getSize();
+			$mtimeChanged = $existing->getMtime() !== $node->getMTime();
+			if (!$sizeChanged && !$mtimeChanged) {
+				continue;
+			}
+
+			$existing->setSize($node->getSize());
+			$existing->setMtime($node->getMTime());
+			$existing->setSourceFileid($node->getId());
+			$existing->setState(MigrationFile::STATE_DISCOVERED);
+			$existing->setSourceChecksum(null);
+			$existing->setTargetChecksum(null);
+			$existing->setBytesTransferred(0);
+			$existing->setTransferAttempts(0);
+			$existing->setVerifyAttempts(0);
+			$existing->setLastError(null);
+			$existing->setTransferId(null);
+			$existing->setNextChunkIndex(0);
+			$existing->setLockOwner(null);
+			$existing->setLockExpiresAt(null);
+			$existing->setNextRetryAt(null);
+			$existing->setTransferredAt(null);
+			$existing->setVerifiedAt(null);
+			$existing->setUpdatedAt($now);
+			$this->fileMapper->update($existing);
+			$counts['changed']++;
+		}
+
+		$this->flush($batch);
+
+		if ($counts['new'] > 0 || $counts['changed'] > 0) {
+			$this->logger->info('Incremental sync discovery found changes', [
+				'app' => 'nextcloud_migrate',
+				'runId' => $runId,
+				'sourceUserId' => $sourceUserId,
+				'counts' => $counts,
+			]);
+		}
+
+		return $counts;
+	}
+
+	/**
+	 * Iterative DFS (explicit stack, not recursion, to avoid PHP call-stack
+	 * limits on very deep trees) over every file/folder under $userFolder,
+	 * excluding the root folder itself.
+	 *
+	 * @return \Generator<array{0:string,1:Node,2:bool}>
+	 */
+	private function walk(Folder $userFolder): \Generator {
+		$stack = [$userFolder];
+
+		while ($stack !== []) {
+			/** @var Node $node */
+			$node = array_pop($stack);
+
+			if ($node->getPath() === $userFolder->getPath()) {
+				if ($node instanceof Folder) {
+					foreach ($node->getDirectoryListing() as $child) {
+						$stack[] = $child;
+					}
+				}
+				continue;
+			}
+
+			$isDirectory = $node instanceof Folder;
+			yield [$this->relativePath($userFolder, $node), $node, $isDirectory];
+
+			if ($isDirectory) {
+				foreach ($node->getDirectoryListing() as $child) {
+					$stack[] = $child;
+				}
+			}
+		}
 	}
 
 	/**

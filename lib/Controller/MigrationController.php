@@ -333,6 +333,47 @@ class MigrationController extends Controller {
 		return new JSONResponse([], Http::STATUS_NO_CONTENT);
 	}
 
+	/**
+	 * Enables continuous sync on a finished run (see
+	 * RunOrchestrator::startSyncing()): the source is periodically
+	 * re-scanned for new/changed files so the target stays up to date
+	 * while users are gradually switched over. Only available for the
+	 * 'overwrite_newer' collision strategy.
+	 */
+	public function keepSyncing(int $runId): JSONResponse {
+		$run = $this->ownedRun($runId);
+		if ($run instanceof JSONResponse) {
+			return $run;
+		}
+
+		try {
+			$run = $this->runOrchestrator->startSyncing($runId);
+		} catch (\RuntimeException $e) {
+			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_CONFLICT);
+		}
+
+		return new JSONResponse($run);
+	}
+
+	/**
+	 * Stops continuous sync, settling the run into a terminal state (see
+	 * RunOrchestrator::stopSyncing()).
+	 */
+	public function stopSyncing(int $runId): JSONResponse {
+		$run = $this->ownedRun($runId);
+		if ($run instanceof JSONResponse) {
+			return $run;
+		}
+
+		try {
+			$run = $this->runOrchestrator->stopSyncing($runId);
+		} catch (\RuntimeException $e) {
+			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_CONFLICT);
+		}
+
+		return new JSONResponse($run);
+	}
+
 	private function currentUserId(): string {
 		return $this->userSession->getUser()?->getUID() ?? throw new \RuntimeException('No authenticated user');
 	}

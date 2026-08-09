@@ -30,6 +30,8 @@ return [
         ['name' => 'migration#resumeRun', 'url' => '/api/v1/runs/{runId}/resume', 'verb' => 'POST'],
         ['name' => 'migration#cancelRun', 'url' => '/api/v1/runs/{runId}/cancel', 'verb' => 'POST'],
         ['name' => 'migration#retryFailures', 'url' => '/api/v1/runs/{runId}/retry-failures', 'verb' => 'POST'],
+        ['name' => 'migration#keepSyncing', 'url' => '/api/v1/runs/{runId}/keep-syncing', 'verb' => 'POST'],
+        ['name' => 'migration#stopSyncing', 'url' => '/api/v1/runs/{runId}/stop-syncing', 'verb' => 'POST'],
         ['name' => 'migration#deleteRun', 'url' => '/api/v1/runs/{runId}', 'verb' => 'DELETE'],
 
         // Status / reporting

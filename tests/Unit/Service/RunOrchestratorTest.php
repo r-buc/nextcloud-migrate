@@ -6,6 +6,7 @@ namespace Tests\Unit\Service;
 
 use OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob;
 use OCA\NextcloudMigrate\BackgroundJob\FinalizeJob;
+use OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob;
 use OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
@@ -15,6 +16,7 @@ use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
 use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\CredentialService;
+use OCA\NextcloudMigrate\Service\DiscoveryService;
 use OCA\NextcloudMigrate\Service\EventLogger;
 use OCA\NextcloudMigrate\Service\ProvisioningClient;
 use OCA\NextcloudMigrate\Service\ReportService;
@@ -41,6 +43,7 @@ final class RunOrchestratorTest extends TestCase {
 	private EventLogger $eventLogger;
 	private IJobList $jobList;
 	private IConfig $config;
+	private DiscoveryService $discoveryService;
 	private RunOrchestrator $orchestrator;
 
 	protected function setUp(): void {
@@ -55,6 +58,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->eventLogger = $this->createMock(EventLogger::class);
 		$this->jobList = $this->createMock(IJobList::class);
 		$this->config = $this->createMock(IConfig::class);
+		$this->discoveryService = $this->createMock(DiscoveryService::class);
 
 		// update() just needs to accept a MigrationRun and hand it back.
 		$this->runMapper->method('update')->willReturnArgument(0);
@@ -79,6 +83,7 @@ final class RunOrchestratorTest extends TestCase {
 			$this->eventLogger,
 			$this->jobList,
 			$this->config,
+			$this->discoveryService,
 		);
 	}
 
@@ -394,5 +399,152 @@ final class RunOrchestratorTest extends TestCase {
 		$this->orchestrator->reconcileStalledRuns();
 
 		self::assertSame(MigrationRun::STATE_FINALIZING, $run->getState());
+	}
+
+	public function testStartSyncingRejectsUnfinishedRun(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_TRANSFERRING));
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->startSyncing(42);
+	}
+
+	public function testStartSyncingRejectsWrongCollisionStrategy(): void {
+		$run = $this->makeRun(MigrationRun::STATE_COMPLETED);
+		$run->setCollisionStrategy('rename');
+		$this->runMapper->method('find')->willReturn($run);
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->startSyncing(42);
+	}
+
+	public function testStartSyncingSucceedsForFinishedOverwriteNewerRun(): void {
+		$run = $this->makeRun(MigrationRun::STATE_COMPLETED_WITH_ERRORS);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+
+		$run = $this->orchestrator->startSyncing(42);
+
+		self::assertSame(MigrationRun::STATE_SYNCING, $run->getState());
+	}
+
+	public function testStopSyncingRejectsWhenNotSyncing(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_COMPLETED));
+
+		$this->expectException(\RuntimeException::class);
+		$this->orchestrator->stopSyncing(42);
+	}
+
+	public function testStopSyncingSettlesIntoCompletedWithoutFailures(): void {
+		$run = $this->makeRun(MigrationRun::STATE_SYNCING);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_VERIFIED => 20,
+		]);
+
+		$run = $this->orchestrator->stopSyncing(42);
+
+		self::assertSame(MigrationRun::STATE_COMPLETED, $run->getState());
+		self::assertNotNull($run->getFinishedAt());
+	}
+
+	public function testStopSyncingSettlesIntoCompletedWithErrorsWhenFailuresRemain(): void {
+		$run = $this->makeRun(MigrationRun::STATE_SYNCING);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_VERIFIED => 18,
+			MigrationFile::STATE_TRANSFER_FAILED => 2,
+		]);
+
+		$run = $this->orchestrator->stopSyncing(42);
+
+		self::assertSame(MigrationRun::STATE_COMPLETED_WITH_ERRORS, $run->getState());
+	}
+
+	public function testRunSyncPassDoesNothingWhenRunIsNotSyncing(): void {
+		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_COMPLETED));
+
+		$this->userMapMapper->expects($this->never())->method('findByRun');
+
+		$this->orchestrator->runSyncPass(42);
+	}
+
+	public function testRunSyncPassSpawnsTransferWorkerWhenChangesFound(): void {
+		$run = $this->makeRun(MigrationRun::STATE_SYNCING);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+
+		$userMapA = new UserMap();
+		$userMapA->setId(1);
+		$userMapA->setState(UserMap::STATE_ACTIVE);
+		$userMapA->setSourceUserId('alice');
+		$userMapB = new UserMap();
+		$userMapB->setId(2);
+		$userMapB->setState(UserMap::STATE_FAILED);
+		$userMapB->setSourceUserId('bob');
+		$this->userMapMapper->method('findByRun')->willReturn([$userMapA, $userMapB]);
+
+		$this->discoveryService->expects($this->once())
+			->method('discoverIncremental')
+			->with(42, $userMapA, 'alice')
+			->willReturn(['new' => 1, 'changed' => 0]);
+
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_DISCOVERED => 1,
+			MigrationFile::STATE_VERIFIED => 20,
+		]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(TransferWorkerJob::class, self::callback(fn ($arg) => $arg['runId'] === 42 && $arg['userMapId'] === 1), 0);
+
+		$this->orchestrator->runSyncPass(42);
+
+		self::assertNotNull($run->getLastSyncAt());
+	}
+
+	public function testRunSyncPassSkipsSpawningWhenNothingChanged(): void {
+		$run = $this->makeRun(MigrationRun::STATE_SYNCING);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+
+		$userMap = new UserMap();
+		$userMap->setId(1);
+		$userMap->setState(UserMap::STATE_ACTIVE);
+		$userMap->setSourceUserId('alice');
+		$this->userMapMapper->method('findByRun')->willReturn([$userMap]);
+
+		$this->discoveryService->method('discoverIncremental')->willReturn(['new' => 0, 'changed' => 0]);
+		$this->fileMapper->method('countByState')->willReturn([
+			MigrationFile::STATE_VERIFIED => 20,
+		]);
+
+		$this->jobList->expects($this->never())->method('add');
+
+		$this->orchestrator->runSyncPass(42);
+	}
+
+	public function testRetryFailuresFromSyncingStaysSyncingAndRespawnsWorkers(): void {
+		$run = $this->makeRun(MigrationRun::STATE_SYNCING);
+		$run->setCollisionStrategy('overwrite_newer');
+		$this->runMapper->method('find')->willReturn($run);
+		$this->fileMapper->method('resetFailuresForRetry')->willReturn(3);
+
+		$userMapA = new UserMap();
+		$userMapA->setId(1);
+		$userMapA->setState(UserMap::STATE_ACTIVE);
+		$userMapB = new UserMap();
+		$userMapB->setId(2);
+		$userMapB->setState(UserMap::STATE_FAILED);
+		$this->userMapMapper->method('findByRun')->willReturn([$userMapA, $userMapB]);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(TransferWorkerJob::class, self::callback(fn ($arg) => $arg['runId'] === 42 && $arg['userMapId'] === 1), 0);
+
+		$run = $this->orchestrator->retryFailures(42);
+
+		self::assertSame(MigrationRun::STATE_SYNCING, $run->getState());
 	}
 }

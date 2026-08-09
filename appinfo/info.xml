@@ -27,6 +27,7 @@ content, folder structure, and modification time only.
         <job>OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob</job>
         <job>OCA\NextcloudMigrate\BackgroundJob\FinalizeJob</job>
         <job>OCA\NextcloudMigrate\BackgroundJob\CleanupLocksJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\SyncDiscoveryJob</job>
     </background-jobs>
     <settings>
         <admin>OCA\NextcloudMigrate\Settings\AdminSettings</admin>

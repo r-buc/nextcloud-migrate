@@ -47,6 +47,8 @@ use OCP\AppFramework\Db\Entity;
  * @method void setStartedAt(?int $startedAt)
  * @method int|null getFinishedAt()
  * @method void setFinishedAt(?int $finishedAt)
+ * @method int|null getLastSyncAt()
+ * @method void setLastSyncAt(?int $lastSyncAt)
  * @method int getCreatedAt()
  * @method void setCreatedAt(int $createdAt)
  * @method int getUpdatedAt()
@@ -68,6 +70,18 @@ class MigrationRun extends Entity implements \JsonSerializable {
 	public const STATE_FAILED = 'failed';
 	public const STATE_PAUSED = 'paused';
 	public const STATE_CANCELLED = 'cancelled';
+	// Opt-in steady state entered from COMPLETED/COMPLETED_WITH_ERRORS via
+	// RunOrchestrator::startSyncing() once the initial transfer+verification
+	// pass has finished, so the source and target can be kept up to date
+	// while users are gradually switched over to the new instance. Only
+	// available for runs using the 'overwrite_newer' collision strategy -
+	// see MappingService::STRATEGY_OVERWRITE_IF_NEWER - since that's the
+	// only strategy where re-syncing a changed, already-migrated file does
+	// something sensible (skip/rename would either never update it or pile
+	// up duplicates every cycle). Left via RunOrchestrator::stopSyncing(),
+	// which re-evaluates failures and settles back into COMPLETED or
+	// COMPLETED_WITH_ERRORS, same as finalizeRun() does for the initial pass.
+	public const STATE_SYNCING = 'syncing';
 
 	protected $uuid;
 	protected $instanceId;
@@ -89,6 +103,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 	protected $approvedAt;
 	protected $startedAt;
 	protected $finishedAt;
+	protected $lastSyncAt;
 	protected $createdAt;
 	protected $updatedAt;
 
@@ -105,6 +120,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 		$this->addType('approvedAt', 'integer');
 		$this->addType('startedAt', 'integer');
 		$this->addType('finishedAt', 'integer');
+		$this->addType('lastSyncAt', 'integer');
 		$this->addType('createdAt', 'integer');
 		$this->addType('updatedAt', 'integer');
 	}
@@ -130,6 +146,7 @@ class MigrationRun extends Entity implements \JsonSerializable {
 			'approvedAt' => $this->getApprovedAt(),
 			'startedAt' => $this->getStartedAt(),
 			'finishedAt' => $this->getFinishedAt(),
+			'lastSyncAt' => $this->getLastSyncAt(),
 			'createdAt' => $this->getCreatedAt(),
 			'updatedAt' => $this->getUpdatedAt(),
 		];
