@@ -121,8 +121,8 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
           asset_name: ${{ env.APP_ID }}.tar.gz
-          tag: main-${{ github.sha }}
-          release_name: "Development build (${{ github.sha }})"
+          tag: dev
+          release_name: "Development build"
           prerelease: true
           overwrite: true
 
