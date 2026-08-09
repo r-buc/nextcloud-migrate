@@ -98,6 +98,32 @@ class MigrationFileMapper extends QBMapper {
 	}
 
 	/**
+	 * Highest source_fileid already recorded for a user within a run (0 if
+	 * none yet) - used by DiscoveryService::discoverIncremental() to catch
+	 * brand new source files during a re-scan even when their mtime was
+	 * preserved from elsewhere (e.g. copied in from a backup) and so isn't
+	 * actually recent by clock time; a fileid is assigned once, in a
+	 * strictly increasing global sequence, when a filecache row is first
+	 * created, so anything higher is guaranteed to be new regardless of
+	 * its mtime.
+	 *
+	 * @throws Exception
+	 */
+	public function maxSourceFileId(int $runId, int $userMapId): int {
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectAlias($qb->createFunction('MAX(source_fileid)'), 'max_fileid')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)));
+
+		$result = $qb->executeQuery();
+		$max = $result->fetchOne();
+		$result->closeCursor();
+
+		return $max !== false && $max !== null ? (int)$max : 0;
+	}
+
+	/**
 	 * Resets every currently-failed file (mapping_failed, transfer_failed,
 	 * verification_failed) for a run back to DISCOVERED with attempt
 	 * counters and retry/lock state cleared, so an admin-triggered retry

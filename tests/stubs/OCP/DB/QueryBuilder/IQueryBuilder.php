@@ -12,4 +12,5 @@ namespace OCP\DB\QueryBuilder;
 interface IQueryBuilder {
 	public const PARAM_STR_ARRAY = 102;
 	public const PARAM_BOOL = 5;
+	public const PARAM_INT = 1;
 }

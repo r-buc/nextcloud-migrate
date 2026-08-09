@@ -14,9 +14,14 @@ ACLs.
 ## Architecture
 
 - **Push mode**: this app is installed on the SOURCE instance. Discovery
-  reads the local file tree directly via the Nextcloud Files API
-  (`OCP\Files\IRootFolder`) - fast, no HTTP. Only the TARGET instance is
-  reached over the network, via WebDAV.
+  reads directly from Nextcloud's own filecache (`Db\FilecacheReader`, raw
+  `oc_storages`/`oc_filecache`/`oc_mimetypes` queries) rather than walking
+  the tree via the Files API - fast even at 100k-file scale, `ORDER BY
+  path` gives parent-before-child ordering "for free" (ideal for
+  in-order remote folder creation), and it lets currently-encrypted files
+  be excluded automatically at the SQL level (see "Leftover server-side
+  encryption" below). Only the TARGET instance is reached over the
+  network, via WebDAV.
 - **Credentials (important)**: Nextcloud's WebDAV auth backend rewrites the
   DAV principal to whichever user actually authenticates - there is no
   admin-bypass for writing into a different user's files. So the single
@@ -51,14 +56,20 @@ ACLs.
   *without* first running `occ encryption:decrypt-all`, those older files
   stay physically encrypted on disk - and once the encryption app is off,
   the standard Files API's decrypt-on-read no longer applies to them, so
-  reading one returns raw ciphertext starting with Nextcloud's own
+  reading one would return raw ciphertext starting with Nextcloud's own
   encryption header (`HBEGIN:oc_encryption_module:...`, see
-  `\OC\Encryption\Util`). `TransferService` detects that exact marker at
-  the start of a file's content and fails it immediately with an
-  actionable message, instead of silently uploading unreadable ciphertext
-  to the target with no warning. Fix on the source instance: re-enable
-  the encryption app and run `occ encryption:decrypt-all`, then retry the
-  affected file(s).
+  `\OC\Encryption\Util`) instead of the real content. Rather than
+  detecting this at transfer time, discovery (`FilecacheReader`) excludes
+  such files up front by querying the filecache's own `encrypted` column
+  directly - they're never turned into a `migrate_files` row at all, so
+  nothing ever tries to read/upload the raw ciphertext. This is otherwise
+  invisible (there's no failed-file row to see), so a
+  `source_files_excluded_encrypted` run event is logged with the affected
+  count whenever discovery finds any, so an admin isn't left wondering why
+  the numbers don't match what's on disk. Fix on the source instance:
+  re-enable the encryption app and run `occ encryption:decrypt-all`, then
+  retry discovery (re-run the dry run, or - for continuous sync - wait for
+  the next scan) to pick the now-decrypted files up.
 - **Stale source filecache metadata**: separately, the torn-read guard
   above also compares the number of bytes *actually read* against the
   file's reported `getSize()` - even when mtime/size report completely
@@ -274,7 +285,7 @@ ACLs.
 | Concern | Class |
 |---|---|
 | Run state machine | `Service\RunOrchestrator` |
-| Local tree walk | `Service\DiscoveryService` |
+| Discovery (filecache-based) | `Service\DiscoveryService`, `Db\FilecacheReader` |
 | Collision resolution | `Service\MappingService` |
 | Upload (simple + chunked) | `Service\TransferService` |
 | Checksum verification | `Service\VerificationService` |

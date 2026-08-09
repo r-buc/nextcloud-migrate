@@ -526,13 +526,21 @@ class RunOrchestrator {
 			return;
 		}
 
+		// Narrows discoverIncremental()'s underlying filecache scan to
+		// likely-changed candidates (see FilecacheReader::walk()) instead
+		// of re-examining every file on every tick. Falls back to
+		// finishedAt (when the initial pipeline completed) for the very
+		// first sync pass, since a file could already have changed between
+		// then and whenever the admin later enabled continuous sync.
+		$since = $run->getLastSyncAt() ?? $run->getFinishedAt() ?? 0;
+
 		foreach ($this->userMapMapper->findByRun($runId) as $userMap) {
 			if ($userMap->getState() === UserMap::STATE_FAILED) {
 				continue;
 			}
 
 			try {
-				$result = $this->discoveryService->discoverIncremental($runId, $userMap, $userMap->getSourceUserId());
+				$result = $this->discoveryService->discoverIncremental($runId, $userMap, $userMap->getSourceUserId(), $since);
 			} catch (\Throwable $e) {
 				$this->eventLogger->log($runId, 'sync_scan_failed', "Incremental sync scan failed for user '{$userMap->getSourceUserId()}': {$e->getMessage()}", 'error');
 				continue;
@@ -542,6 +550,7 @@ class RunOrchestrator {
 				$this->jobList->add(TransferWorkerJob::class, ['runId' => $runId, 'userMapId' => $userMap->getId(), 'workerToken' => UuidGenerator::v4()], JobScheduling::IMMEDIATE_FIRST_CHECK);
 			}
 		}
+
 
 		$counts = $this->fileMapper->countByState($runId);
 		$run->setTotalFiles(array_sum($counts));

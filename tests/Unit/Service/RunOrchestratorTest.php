@@ -487,7 +487,7 @@ final class RunOrchestratorTest extends TestCase {
 
 		$this->discoveryService->expects($this->once())
 			->method('discoverIncremental')
-			->with(42, $userMapA, 'alice')
+			->with(42, $userMapA, 'alice', 0)
 			->willReturn(['new' => 1, 'changed' => 0]);
 
 		$this->fileMapper->method('countByState')->willReturn([

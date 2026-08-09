@@ -48,18 +48,6 @@ class TransferService {
 	// limit is ever raised again.
 	private const BACKOFF_SECONDS = [1, 5, 30, 300];
 
-	// The literal marker Nextcloud's own server-side encryption writes at
-	// the very start of an encrypted file's PHYSICAL content (see
-	// \OC\Encryption\Util::HEADER_START/parseRawHeader() - "HBEGIN:" is
-	// always immediately followed by the "oc_encryption_module" key). If a
-	// file's Files-API-level read still starts with this, Nextcloud's own
-	// decrypt-on-read wrapper isn't decrypting it for us - almost always
-	// because the encryption app is (now) disabled/uninstalled on the
-	// source instance, or the reading user's encryption keys aren't
-	// available - so what we're reading is raw ciphertext, not the file's
-	// real content.
-	private const ENCRYPTION_HEADER_MARKER = 'HBEGIN:oc_encryption_module:';
-
 	public function __construct(
 		private IRootFolder $rootFolder,
 		private WebDavClient $webDavClient,
@@ -150,9 +138,6 @@ class TransferService {
 			if ($chunk === false || $chunk === '') {
 				break;
 			}
-			if ($bytesRead === 0) {
-				$this->assertNotRawEncrypted($file, $chunk);
-			}
 			hash_update($ctx, $chunk);
 			fwrite($buffer, $chunk);
 			$bytesRead += strlen($chunk);
@@ -237,9 +222,6 @@ class TransferService {
 				if ($data === false || $data === '') {
 					break;
 				}
-				if ($chunkIndex === 0 && $read === 0) {
-					$this->assertNotRawEncrypted($file, $data);
-				}
 				hash_update($ctx, $data);
 				fwrite($buffer, $data);
 				$read += strlen($data);
@@ -274,39 +256,6 @@ class TransferService {
 
 		$file->setSourceChecksum($sha256);
 		$file->setBytesTransferred($size);
-	}
-
-	/**
-	 * Detects Nextcloud's own server-side encryption header
-	 * (`\OC\Encryption\Util::HEADER_START` = "HBEGIN:", followed by the
-	 * "oc_encryption_module" key - see parseRawHeader()) at the very start
-	 * of a file's content as read via the standard Files API. A properly
-	 * decrypted file's real content should never coincidentally start with
-	 * this exact literal marker, so its presence means Nextcloud's
-	 * decrypt-on-read storage wrapper did NOT decrypt this file for us -
-	 * almost always because the encryption app has since been disabled or
-	 * uninstalled on the source instance (files encrypted while it was
-	 * enabled are NOT automatically decrypted when it's turned back off;
-	 * that requires an explicit `occ encryption:decrypt-all` first) or the
-	 * reading user's encryption keys aren't available. What we'd otherwise
-	 * upload is raw ciphertext, not the file's real content - migrating it
-	 * anyway would silently produce an unreadable/corrupt file on the
-	 * target with no warning, which is worse than a loud, specific
-	 * failure explaining exactly what to fix.
-	 *
-	 * @throws TransferException not retryable - this needs a source-side
-	 *         admin action, not another attempt within this run
-	 */
-	private function assertNotRawEncrypted(MigrationFile $file, string $chunkStart): void {
-		if (!str_starts_with($chunkStart, self::ENCRYPTION_HEADER_MARKER)) {
-			return;
-		}
-
-		throw new TransferException(
-			"Source file '{$file->getSourcePath()}' is still server-side encrypted on the source instance and could not be decrypted for migration (Nextcloud's own encryption header was found in its raw content). "
-			. "Re-enable the encryption app and run 'occ encryption:decrypt-all' on the source instance to decrypt it first, then retry this file.",
-			false,
-		);
 	}
 
 	/**
