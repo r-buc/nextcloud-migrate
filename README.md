@@ -14,13 +14,13 @@ ACLs.
 ## Architecture
 
 - **Push mode**: this app is installed on the SOURCE instance. Discovery
-  reads directly from Nextcloud's own filecache (`Db\FilecacheReader`, raw
-  `oc_storages`/`oc_filecache`/`oc_mimetypes` queries) rather than walking
-  the tree via the Files API - fast even at 100k-file scale, `ORDER BY
-  path` gives parent-before-child ordering "for free" (ideal for
-  in-order remote folder creation), and it lets encrypted files be
-  excluded automatically at the SQL level (see "Encrypted files" below).
-  Only the TARGET instance is reached over the network, via WebDAV.
+  uses Nextcloud's own Files-API search (`OCP\Files\Folder::search()`,
+  see `Service\DiscoveryService`) rather than a recursive
+  `getDirectoryListing()` tree walk - a single paginated, path-ordered
+  query per user is far cheaper at 100k-file scale, and `ORDER BY path`
+  gives parent-before-child ordering "for free" (ideal for in-order
+  remote folder creation). Only the TARGET instance is reached over the
+  network, via WebDAV.
 - **Credentials (important)**: Nextcloud's WebDAV auth backend rewrites the
   DAV principal to whichever user actually authenticates - there is no
   admin-bypass for writing into a different user's files. So the single
@@ -50,19 +50,20 @@ ACLs.
   Opt-in continuous sync (see "Continuous sync" below) lifts this
   limitation for as long as it stays enabled, by periodically re-scanning
   for exactly such post-verification edits.
-- **Encrypted files**: a file still server-side encrypted on the source
-  (see "Out of scope" below - encryption keys are instance-specific, so an
-  encrypted file can't be transferred meaningfully regardless of why it's
-  encrypted) is excluded automatically at discovery by querying the
-  filecache's own `encrypted` column directly (`FilecacheReader`) - it's
-  never turned into a `migrate_files` row at all. This is otherwise
-  invisible (there's no failed-file row to see), so a
-  `source_files_excluded_encrypted` run event is logged with the affected
-  count whenever discovery finds any, so an admin isn't left wondering why
-  the numbers don't match what's on disk. To include such files, decrypt
-  them on the source first (`occ encryption:decrypt-all`), then retry
-  discovery (re-run the dry run, or - for continuous sync - wait for the
-  next scan).
+- **Encrypted files**: no special detection or exclusion - a file still
+  server-side encrypted on the source is simply discovered and transferred
+  like any other file. If it genuinely can't be decrypted (e.g. the
+  encryption module can't find/use the right keys), the Files API read
+  fails and that shows up as an ordinary failed file (see "Failure
+  logging"/"Retrying failed files" below) - no bespoke handling needed.
+  One known gap: if the encryption app has been fully disabled/removed on
+  the source (rather than just left with unavailable keys), Nextcloud's
+  own storage wrapper silently falls back to returning the raw, still-
+  encrypted bytes with no error at all (confirmed against
+  `OC\Files\Storage\Wrapper\Encryption::fopen()`'s `ModuleDoesNotExistsException`
+  handling) - such a file would transfer "successfully" but be unreadable
+  ciphertext on the target. Avoid this by decrypting first
+  (`occ encryption:decrypt-all`) before fully removing the encryption app.
 - **Stale source filecache metadata**: separately, the torn-read guard
   above also compares the number of bytes *actually read* against the
   file's reported `getSize()` - even when mtime/size report completely
@@ -278,7 +279,7 @@ ACLs.
 | Concern | Class |
 |---|---|
 | Run state machine | `Service\RunOrchestrator` |
-| Discovery (filecache-based) | `Service\DiscoveryService`, `Db\FilecacheReader` |
+| Discovery (Files API search) | `Service\DiscoveryService` |
 | Collision resolution | `Service\MappingService` |
 | Upload (simple + chunked) | `Service\TransferService` |
 | Checksum verification | `Service\VerificationService` |
@@ -299,8 +300,10 @@ and runs (`created_by` ownership check). See `appinfo/routes.php`.
   user-mapping resolution; deferred to keep v1 focused on file fidelity.
 - **Versions**: tied to source file IDs; not portable 1:1 across instances.
 - **Encrypted files**: server-side encryption keys are instance-specific,
-  so an encrypted file can't be transferred meaningfully - excluded
-  automatically at discovery (see "Encrypted files" under Architecture).
+  so an encrypted file can't be transferred meaningfully - not specially
+  detected, a file that genuinely can't be decrypted just fails transfer
+  like any other unreadable file (see "Encrypted files" under
+  Architecture).
 - **Federated shares/ACLs**: require cross-instance trust setup out of scope
   for a one-shot migration tool.
 

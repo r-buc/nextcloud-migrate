@@ -4,29 +4,52 @@ declare(strict_types=1);
 
 namespace OCA\NextcloudMigrate\Service;
 
-use OCA\NextcloudMigrate\Db\FilecacheReader;
+use OC\Files\Search\SearchComparison;
+use OC\Files\Search\SearchOrder;
+use OC\Files\Search\SearchQuery;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\UserMap;
+use OCP\Files\Folder;
+use OCP\Files\IRootFolder;
+use OCP\Files\Node;
+use OCP\Files\Search\ISearchComparison;
+use OCP\Files\Search\ISearchOrder;
 use Psr\Log\LoggerInterface;
 
 /**
- * Snapshots a source user's files into migrate_files rows for a run by
- * reading directly from Nextcloud's own filecache (see FilecacheReader)
- * rather than walking the tree via the Files API. See FilecacheReader's
- * class docblock for why: performance at scale, ordering "for free" so
- * parent folders are always created before their children, and automatic
- * exclusion of currently-encrypted files.
+ * Snapshots a source user's files into migrate_files rows for a run using
+ * Nextcloud's own Files-API search (`OCP\Files\Folder::search()`) - a
+ * single paginated, path-ordered query per user, instead of a recursive
+ * `getDirectoryListing()` tree walk:
+ *  - Far cheaper at 100k-file scale than instantiating a Node per entry via
+ *    a recursive walk (each of which does its own permission/mount checks
+ *    and possibly further queries).
+ *  - `ORDER BY path` gives parent-before-child ordering "for free" (a
+ *    shorter string that is a strict prefix of a longer one always sorts
+ *    first) - no explicit tree-walk bookkeeping needed to guarantee it.
+ *  - Scoped to the given Folder automatically (internally jailed to that
+ *    subtree), so trashbin/versions/cache and similar unrelated top-level
+ *    content is never returned.
+ * The concrete `OC\Files\Search\*` value classes used to build the query
+ * have no OCP-namespaced equivalent, but this is the documented, standard
+ * way apps construct a Files API search query (there is no public factory).
+ *
+ * No attempt is made here to detect or exclude server-side-encrypted files:
+ * a file that can't actually be decrypted for whatever reason simply fails
+ * to transfer like any other unreadable file (TransferService's existing
+ * generic error handling already logs that as a normal failed file), rather
+ * than needing bespoke pre-detection.
  */
 class DiscoveryService {
-	// Flush newly-discovered rows to the DB in batches to bound memory
-	// usage on large trees (target scale: up to ~100k files/run).
+	// Page size for Folder::search() (LIMIT/OFFSET - the search API has no
+	// keyset-pagination support; 'path' only supports eq/like comparisons,
+	// not gt/gte) and for batching migrate_files inserts.
 	private const BATCH_SIZE = 500;
 
 	public function __construct(
-		private FilecacheReader $filecacheReader,
+		private IRootFolder $rootFolder,
 		private MigrationFileMapper $fileMapper,
-		private EventLogger $eventLogger,
 		private LoggerInterface $logger,
 	) {
 	}
@@ -35,24 +58,24 @@ class DiscoveryService {
 	 * Discovers every file/folder under the given source user's "files"
 	 * root and persists a snapshot row per node.
 	 *
-	 * @throws \RuntimeException if the user has no home storage
 	 * @return array{files:int,folders:int,bytes:int}
 	 */
 	public function discoverUser(int $runId, UserMap $userMap, string $sourceUserId): array {
-		$storageId = $this->requireHomeStorageId($sourceUserId);
+		$userFolder = $this->rootFolder->getUserFolder($sourceUserId);
 
 		$stats = ['files' => 0, 'folders' => 0, 'bytes' => 0];
 		$batch = [];
 		$now = time();
 
-		foreach ($this->filecacheReader->walk($storageId) as $row) {
-			$batch[] = $this->buildEntity($runId, $userMap->getId(), $row, $now);
+		foreach ($this->walk($userFolder) as $node) {
+			$isDirectory = $node instanceof Folder;
+			$batch[] = $this->buildEntity($runId, $userMap->getId(), $userFolder, $node, $isDirectory, $now);
 
-			if ($row['isDirectory']) {
+			if ($isDirectory) {
 				$stats['folders']++;
 			} else {
 				$stats['files']++;
-				$stats['bytes'] += $row['size'];
+				$stats['bytes'] += $node->getSize();
 			}
 
 			if (count($batch) >= self::BATCH_SIZE) {
@@ -62,7 +85,6 @@ class DiscoveryService {
 		}
 
 		$this->flush($batch);
-		$this->logExcludedEncrypted($runId, $storageId, $sourceUserId);
 
 		$this->logger->info('Discovery completed for user', [
 			'app' => 'nextcloud_migrate',
@@ -94,33 +116,41 @@ class DiscoveryService {
 	 *    is surfaced via the normal failed-files list/manual retry, not
 	 *    silently reset by a background scan).
 	 *  - Deletions on the source are NOT propagated to the target - a
-	 *    disappeared path simply isn't returned by FilecacheReader::walk()
-	 *    and its row is left exactly as-is. (Not supported yet; see README.)
+	 *    disappeared path simply isn't returned by the search and its row
+	 *    is left exactly as-is. (Not supported yet; see README.)
 	 * Folders are only ever inserted when new (MKCOL is idempotent and
 	 * folders carry no content to "change"), never reset.
 	 *
-	 * $since narrows the underlying filecache scan to likely-changed rows
-	 * (see FilecacheReader::walk()) instead of re-examining every file on
-	 * every pass - pass null (or omit) to force a full re-scan.
+	 * $since narrows the underlying search to files/folders whose mtime is
+	 * at/after that timestamp - an efficiency optimization, not a
+	 * guarantee: a genuinely new file whose mtime was deliberately
+	 * preserved from elsewhere (e.g. copied in from an old backup) could
+	 * have an older mtime and be missed until the next full scan (pass
+	 * null to force one). Accepted trade-off for using the officially
+	 * supported search API, which offers no reliable "definitely new/
+	 * changed since X" signal (unlike raw SQL against filecache's own
+	 * auto-incrementing fileid, which the search field whitelist - see
+	 * `\OC\Files\Cache\SearchBuilder::validateComparison()` - only exposes
+	 * for `eq`/`in` comparisons, not `gt`).
 	 *
-	 * @throws \RuntimeException if the user has no home storage
 	 * @return array{new:int,changed:int}
 	 */
 	public function discoverIncremental(int $runId, UserMap $userMap, string $sourceUserId, ?int $since = null): array {
-		$storageId = $this->requireHomeStorageId($sourceUserId);
-		$minFileId = $since !== null ? $this->fileMapper->maxSourceFileId($runId, $userMap->getId()) : null;
+		$userFolder = $this->rootFolder->getUserFolder($sourceUserId);
 
 		$counts = ['new' => 0, 'changed' => 0];
 		$batch = [];
 		$now = time();
 		$resyncableStates = [MigrationFile::STATE_VERIFIED, MigrationFile::STATE_COMPLETED];
 
-		foreach ($this->filecacheReader->walk($storageId, $since, $minFileId) as $row) {
-			$pathHash = hash('sha256', $row['path']);
+		foreach ($this->walk($userFolder, $since) as $node) {
+			$isDirectory = $node instanceof Folder;
+			$relativePath = $this->relativePath($userFolder, $node);
+			$pathHash = hash('sha256', $relativePath);
 			$existing = $this->fileMapper->findByRunAndPathHash($runId, $userMap->getId(), $pathHash);
 
 			if ($existing === null) {
-				$batch[] = $this->buildEntity($runId, $userMap->getId(), $row, $now);
+				$batch[] = $this->buildEntity($runId, $userMap->getId(), $userFolder, $node, $isDirectory, $now);
 				$counts['new']++;
 
 				if (count($batch) >= self::BATCH_SIZE) {
@@ -130,17 +160,17 @@ class DiscoveryService {
 				continue;
 			}
 
-			if ($row['isDirectory'] || !in_array($existing->getState(), $resyncableStates, true)) {
+			if ($isDirectory || !in_array($existing->getState(), $resyncableStates, true)) {
 				continue;
 			}
 
-			if ($existing->getSize() === $row['size'] && $existing->getMtime() === $row['mtime']) {
+			if ($existing->getSize() === $node->getSize() && $existing->getMtime() === $node->getMTime()) {
 				continue;
 			}
 
-			$existing->setSize($row['size']);
-			$existing->setMtime($row['mtime']);
-			$existing->setSourceFileid($row['fileid']);
+			$existing->setSize($node->getSize());
+			$existing->setMtime($node->getMTime());
+			$existing->setSourceFileid($node->getId());
 			$existing->setState(MigrationFile::STATE_DISCOVERED);
 			$existing->setSourceChecksum(null);
 			$existing->setTargetChecksum(null);
@@ -175,31 +205,52 @@ class DiscoveryService {
 	}
 
 	/**
-	 * @throws \RuntimeException
+	 * Paginated, path-ordered search of everything under $userFolder
+	 * (parent-before-child - see class docblock), excluding the root
+	 * folder row itself.
+	 *
+	 * @return \Generator<Node>
 	 */
-	private function requireHomeStorageId(string $sourceUserId): int {
-		$storageId = $this->filecacheReader->resolveHomeStorageId($sourceUserId);
-		if ($storageId === null) {
-			throw new \RuntimeException("No home storage found for user '{$sourceUserId}'");
-		}
+	private function walk(Folder $userFolder, ?int $sinceMtime = null): \Generator {
+		// 'mtime' is the only reliably cross-version-supported field for
+		// this kind of comparison (see discoverIncremental()'s docblock) -
+		// >= 0 is just an always-true condition for a full scan, since a
+		// real mtime is never negative.
+		$comparison = new SearchComparison(ISearchComparison::COMPARE_GREATER_THAN_EQUAL, 'mtime', $sinceMtime ?? 0);
+		$order = [new SearchOrder(ISearchOrder::DIRECTION_ASCENDING, 'path')];
 
-		return $storageId;
+		$offset = 0;
+		while (true) {
+			$query = new SearchQuery($comparison, self::BATCH_SIZE, $offset, $order);
+			$nodes = $userFolder->search($query);
+
+			foreach ($nodes as $node) {
+				if ($node->getPath() === $userFolder->getPath()) {
+					continue;
+				}
+				yield $node;
+			}
+
+			if (count($nodes) < self::BATCH_SIZE) {
+				return;
+			}
+			$offset += self::BATCH_SIZE;
+		}
 	}
 
-	/**
-	 * @param array{path:string,fileid:int,size:int,mtime:int,mimetype:string,isDirectory:bool} $row
-	 */
-	private function buildEntity(int $runId, int $userMapId, array $row, int $now): MigrationFile {
+	private function buildEntity(int $runId, int $userMapId, Folder $userFolder, Node $node, bool $isDirectory, int $now): MigrationFile {
+		$relativePath = $this->relativePath($userFolder, $node);
+
 		$entity = new MigrationFile();
 		$entity->setRunId($runId);
 		$entity->setUserMapId($userMapId);
-		$entity->setSourcePath($row['path']);
-		$entity->setSourcePathHash(hash('sha256', $row['path']));
-		$entity->setSourceFileid($row['fileid']);
-		$entity->setIsDirectory($row['isDirectory']);
-		$entity->setSize($row['isDirectory'] ? 0 : $row['size']);
-		$entity->setMtime($row['mtime']);
-		$entity->setMimetype($row['isDirectory'] ? 'httpd/unix-directory' : $row['mimetype']);
+		$entity->setSourcePath($relativePath);
+		$entity->setSourcePathHash(hash('sha256', $relativePath));
+		$entity->setSourceFileid($node->getId());
+		$entity->setIsDirectory($isDirectory);
+		$entity->setSize($isDirectory ? 0 : $node->getSize());
+		$entity->setMtime($node->getMTime());
+		$entity->setMimetype($isDirectory ? 'httpd/unix-directory' : $node->getMimetype());
 		$entity->setState(MigrationFile::STATE_DISCOVERED);
 		$entity->setTransferAttempts(0);
 		$entity->setVerifyAttempts(0);
@@ -210,27 +261,13 @@ class DiscoveryService {
 		return $entity;
 	}
 
-	/**
-	 * Files excluded from discovery entirely because they're still
-	 * server-side encrypted (see FilecacheReader::walk()) are otherwise
-	 * invisible anywhere an admin would see them - unlike a transfer
-	 * failure, there's no failed-file row at all to surface via the normal
-	 * failed-files list. Logging a run-level event here at least makes
-	 * their existence and count visible in the audit trail, rather than a
-	 * silent gap between "files on disk" and "files discovered".
-	 */
-	private function logExcludedEncrypted(int $runId, int $storageId, string $sourceUserId): void {
-		$excluded = $this->filecacheReader->countEncrypted($storageId);
-		if ($excluded === 0) {
-			return;
-		}
+	private function relativePath(Folder $userFolder, Node $node): string {
+		$rootPath = rtrim($userFolder->getPath(), '/');
+		$nodePath = $node->getPath();
 
-		$this->eventLogger->log(
-			$runId,
-			'source_files_excluded_encrypted',
-			"{$excluded} file(s) for user '{$sourceUserId}' are still server-side encrypted on the source and were excluded from this migration. Re-enable the encryption app and run 'occ encryption:decrypt-all' on the source instance to decrypt them, then retry discovery.",
-			'warning',
-		);
+		$relative = substr($nodePath, strlen($rootPath));
+
+		return ltrim($relative, '/');
 	}
 
 	/**
@@ -243,3 +280,4 @@ class DiscoveryService {
 		$this->fileMapper->insertBatch($batch);
 	}
 }
+

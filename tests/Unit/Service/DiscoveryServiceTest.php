@@ -4,49 +4,76 @@ declare(strict_types=1);
 
 namespace Tests\Unit\Service;
 
-use OCA\NextcloudMigrate\Db\FilecacheReader;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
 use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Service\DiscoveryService;
-use OCA\NextcloudMigrate\Service\EventLogger;
+use OCP\Files\File;
+use OCP\Files\Folder;
+use OCP\Files\IRootFolder;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
 /**
  * Covers DiscoveryService's discovery/re-sync decision logic (what counts
  * as "new" vs "changed", which states are safe to reset) against a mocked
- * FilecacheReader - the reader's own real SQL isn't exercised here (see
- * FilecacheReader's class docblock: like this app's other Db\*Mapper
- * classes, it's validated via the e2e integration test instead).
+ * Folder::search() - real Nextcloud search-query/DB behavior isn't
+ * exercised here, only validated via the e2e integration test.
  */
 final class DiscoveryServiceTest extends TestCase {
-	private FilecacheReader $filecacheReader;
+	private IRootFolder $rootFolder;
 	private MigrationFileMapper $fileMapper;
-	private EventLogger $eventLogger;
 	private DiscoveryService $discoveryService;
 	private UserMap $userMap;
 
 	protected function setUp(): void {
-		$this->filecacheReader = $this->createMock(FilecacheReader::class);
+		$this->rootFolder = $this->createMock(IRootFolder::class);
 		$this->fileMapper = $this->createMock(MigrationFileMapper::class);
-		$this->eventLogger = $this->createMock(EventLogger::class);
-		$this->discoveryService = new DiscoveryService($this->filecacheReader, $this->fileMapper, $this->eventLogger, $this->createMock(LoggerInterface::class));
+		$this->discoveryService = new DiscoveryService($this->rootFolder, $this->fileMapper, $this->createMock(LoggerInterface::class));
 
 		$this->userMap = new UserMap();
 		$this->userMap->setId(7);
 		$this->userMap->setRunId(1);
 		$this->userMap->setSourceUserId('alice');
 		$this->userMap->setTargetUserId('alice');
-
-		$this->filecacheReader->method('resolveHomeStorageId')->with('alice')->willReturn(99);
 	}
 
 	/**
-	 * @return array{path:string,fileid:int,size:int,mtime:int,mimetype:string,isDirectory:bool}
+	 * @param \OCP\Files\Node[] $searchResults returned for every search()
+	 *        call (single page) unless $consecutivePages is given
 	 */
-	private function fileRow(string $path, int $fileid, int $size, int $mtime): array {
-		return ['path' => $path, 'fileid' => $fileid, 'size' => $size, 'mtime' => $mtime, 'mimetype' => 'text/plain', 'isDirectory' => false];
+	private function makeUserFolder(array $searchResults, ?array $consecutivePages = null): Folder {
+		$root = $this->createMock(Folder::class);
+		$root->method('getPath')->willReturn('/alice/files');
+		if ($consecutivePages !== null) {
+			$root->method('search')->willReturnOnConsecutiveCalls(...$consecutivePages);
+		} else {
+			$root->method('search')->willReturn($searchResults);
+		}
+
+		return $root;
+	}
+
+	private function makeFile(string $path, int $id, int $size, int $mtime, string $mimetype = 'text/plain'): File {
+		$file = $this->createMock(File::class);
+		$file->method('getPath')->willReturn($path);
+		$file->method('getId')->willReturn($id);
+		$file->method('getSize')->willReturn($size);
+		$file->method('getMTime')->willReturn($mtime);
+		$file->method('getMimetype')->willReturn($mimetype);
+
+		return $file;
+	}
+
+	private function makeFolderNode(string $path, int $id): Folder {
+		$folder = $this->createMock(Folder::class);
+		$folder->method('getPath')->willReturn($path);
+		$folder->method('getId')->willReturn($id);
+		$folder->method('getSize')->willReturn(0);
+		$folder->method('getMTime')->willReturn(900);
+		$folder->method('getMimetype')->willReturn('httpd/unix-directory');
+
+		return $folder;
 	}
 
 	private function makeExistingFile(string $state, int $size, int $mtime): MigrationFile {
@@ -69,21 +96,10 @@ final class DiscoveryServiceTest extends TestCase {
 		return $existing;
 	}
 
-	public function testDiscoverUserThrowsWhenNoHomeStorageFound(): void {
-		$this->filecacheReader = $this->createMock(FilecacheReader::class);
-		$this->filecacheReader->method('resolveHomeStorageId')->willReturn(null);
-		$this->discoveryService = new DiscoveryService($this->filecacheReader, $this->fileMapper, $this->eventLogger, $this->createMock(LoggerInterface::class));
-
-		$this->expectException(\RuntimeException::class);
-		$this->discoveryService->discoverUser(1, $this->userMap, 'alice');
-	}
-
-	public function testDiscoverUserInsertsEveryRowReturnedByFilecacheReader(): void {
-		$this->filecacheReader->method('walk')->with(99)->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 100, 1000);
-			yield ['path' => 'Documents', 'fileid' => 43, 'size' => 0, 'mtime' => 900, 'mimetype' => 'httpd/unix-directory', 'isDirectory' => true];
-		})());
-		$this->filecacheReader->method('countEncrypted')->willReturn(0);
+	public function testDiscoverUserInsertsEveryNodeReturnedBySearch(): void {
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 100, 1000);
+		$folder = $this->makeFolderNode('/alice/files/Documents', 43);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file, $folder]));
 
 		$captured = null;
 		$this->fileMapper->expects($this->once())->method('insertBatch')->with($this->callback(function (array $batch) use (&$captured) {
@@ -98,60 +114,61 @@ final class DiscoveryServiceTest extends TestCase {
 		self::assertSame('report.pdf', $captured[0]->getSourcePath());
 		self::assertSame(MigrationFile::STATE_DISCOVERED, $captured[0]->getState());
 		self::assertTrue($captured[1]->getIsDirectory());
+		self::assertSame('Documents', $captured[1]->getSourcePath());
 	}
 
-	public function testDiscoverUserLogsEventWhenEncryptedFilesWereExcluded(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield from [];
-		})());
-		$this->filecacheReader->method('countEncrypted')->with(99)->willReturn(3);
+	public function testDiscoverUserSkipsTheRootFolderItself(): void {
+		$rootNode = $this->makeFolderNode('/alice/files', 1);
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 100, 1000);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$rootNode, $file]));
 
-		$this->eventLogger->expects($this->once())
-			->method('log')
-			->with(1, 'source_files_excluded_encrypted', self::stringContains('3 file(s)'), 'warning');
+		$captured = null;
+		$this->fileMapper->expects($this->once())->method('insertBatch')->with($this->callback(function (array $batch) use (&$captured) {
+			$captured = $batch;
+			return true;
+		}));
 
 		$this->discoveryService->discoverUser(1, $this->userMap, 'alice');
+
+		self::assertCount(1, $captured);
+		self::assertSame('report.pdf', $captured[0]->getSourcePath());
 	}
 
-	public function testDiscoverUserDoesNotLogWhenNoEncryptedFilesExcluded(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield from [];
-		})());
-		$this->filecacheReader->method('countEncrypted')->willReturn(0);
+	public function testDiscoverUserPaginatesUntilAShortPage(): void {
+		// Page size is 500; a first page returning exactly 500 nodes must
+		// trigger a second search() call, which returning fewer than 500
+		// (here: 1) ends pagination.
+		$fullPage = [];
+		for ($i = 0; $i < 500; $i++) {
+			$fullPage[] = $this->makeFile("/alice/files/file{$i}.txt", $i, 10, 1000);
+		}
+		$secondPage = [$this->makeFile('/alice/files/last.txt', 999, 10, 1000)];
 
-		$this->eventLogger->expects($this->never())->method('log');
+		$root = $this->createMock(Folder::class);
+		$root->method('getPath')->willReturn('/alice/files');
+		$root->expects($this->exactly(2))->method('search')->willReturnOnConsecutiveCalls($fullPage, $secondPage);
+		$this->rootFolder->method('getUserFolder')->willReturn($root);
 
-		$this->discoveryService->discoverUser(1, $this->userMap, 'alice');
+		$stats = $this->discoveryService->discoverUser(1, $this->userMap, 'alice');
+
+		self::assertSame(501, $stats['files']);
 	}
 
-	public function testDiscoverIncrementalPassesSinceAndMaxFileIdToFilecacheReader(): void {
-		$this->fileMapper->method('maxSourceFileId')->with(1, 7)->willReturn(555);
-		$this->filecacheReader->expects($this->once())
-			->method('walk')
-			->with(99, 2000, 555)
-			->willReturn((function () {
-				yield from [];
-			})());
+	public function testDiscoverIncrementalPassesSinceMtimeIntoTheSearchQuery(): void {
+		$root = $this->createMock(Folder::class);
+		$root->method('getPath')->willReturn('/alice/files');
+		$root->expects($this->once())->method('search')->with($this->callback(function ($query) {
+			$operation = $query->getSearchOperation();
+			return $operation->getField() === 'mtime' && $operation->getValue() === 2000;
+		}))->willReturn([]);
+		$this->rootFolder->method('getUserFolder')->willReturn($root);
 
 		$this->discoveryService->discoverIncremental(1, $this->userMap, 'alice', 2000);
 	}
 
-	public function testDiscoverIncrementalDoesNotQueryMaxFileIdForFullScan(): void {
-		$this->fileMapper->expects($this->never())->method('maxSourceFileId');
-		$this->filecacheReader->expects($this->once())
-			->method('walk')
-			->with(99, null, null)
-			->willReturn((function () {
-				yield from [];
-			})());
-
-		$this->discoveryService->discoverIncremental(1, $this->userMap, 'alice');
-	}
-
 	public function testBrandNewFileIsInsertedAsDiscovered(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 100, 1000);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 100, 1000);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn(null);
 
 		$captured = null;
@@ -170,9 +187,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testVerifiedFileWithChangedMtimeIsResetForResync(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 200, 2000);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 200, 2000);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$existing = $this->makeExistingFile(MigrationFile::STATE_VERIFIED, 100, 1000);
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn($existing);
 
@@ -194,9 +210,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testCompletedFileWithChangedSizeIsAlsoResetForResync(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 999, 1000);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 999, 1000);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$existing = $this->makeExistingFile(MigrationFile::STATE_COMPLETED, 100, 1000);
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn($existing);
 
@@ -208,9 +223,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testUnchangedVerifiedFileIsLeftAlone(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 100, 1000);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 100, 1000);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$existing = $this->makeExistingFile(MigrationFile::STATE_VERIFIED, 100, 1000);
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn($existing);
 
@@ -224,9 +238,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testFileStillMidPipelineIsNotResetEvenIfChanged(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 999, 9999);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 999, 9999);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$existing = $this->makeExistingFile(MigrationFile::STATE_TRANSFERRING, 100, 1000);
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn($existing);
 
@@ -239,9 +252,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testFailedFileIsNotResetByBackgroundScan(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield $this->fileRow('report.pdf', 42, 999, 9999);
-		})());
+		$file = $this->makeFile('/alice/files/report.pdf', 42, 999, 9999);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$file]));
 		$existing = $this->makeExistingFile(MigrationFile::STATE_TRANSFER_FAILED, 100, 1000);
 		$this->fileMapper->method('findByRunAndPathHash')->willReturn($existing);
 
@@ -253,9 +265,8 @@ final class DiscoveryServiceTest extends TestCase {
 	}
 
 	public function testExistingDirectoryIsNeverResetEvenIfListedAgain(): void {
-		$this->filecacheReader->method('walk')->willReturn((function () {
-			yield ['path' => 'Documents', 'fileid' => 5, 'size' => 0, 'mtime' => 1, 'mimetype' => 'httpd/unix-directory', 'isDirectory' => true];
-		})());
+		$folder = $this->makeFolderNode('/alice/files/Documents', 5);
+		$this->rootFolder->method('getUserFolder')->willReturn($this->makeUserFolder([$folder]));
 
 		$existing = new MigrationFile();
 		$existing->setId(50);

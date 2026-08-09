@@ -526,8 +526,8 @@ class RunOrchestrator {
 			return;
 		}
 
-		// Narrows discoverIncremental()'s underlying filecache scan to
-		// likely-changed candidates (see FilecacheReader::walk()) instead
+		// Narrows discoverIncremental()'s underlying search to
+		// likely-changed candidates (see DiscoveryService::walk()) instead
 		// of re-examining every file on every tick. Falls back to
 		// finishedAt (when the initial pipeline completed) for the very
 		// first sync pass, since a file could already have changed between
