@@ -115,6 +115,9 @@ jobs:
           name: ${{ env.APP_ID }}
           path: ${{ runner.temp }}
 
+      - name: Compute short SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
       - name: Publish unsigned pre-release to GitHub
         uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de
         with:
@@ -122,7 +125,7 @@ jobs:
           file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
           asset_name: ${{ env.APP_ID }}.tar.gz
           tag: dev
-          release_name: "Development build"
+          release_name: "Development build (${{ env.SHORT_SHA }})"
           prerelease: true
           overwrite: true
 
