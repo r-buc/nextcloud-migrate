@@ -18,6 +18,9 @@ jobs:
   build:
     name: Build and validate
     runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.app_metadata.outputs.app_version }}
+      app_release_tag: ${{ steps.app_metadata.outputs.app_release_tag }}
 
     steps:
       - name: Checkout
@@ -47,6 +50,17 @@ jobs:
           fi
 
           echo "NEXTCLOUD_VERSION=stable${nextcloud_max_version}" >> "$GITHUB_ENV"
+
+      - name: Determine app version metadata
+        id: app_metadata
+        run: |
+          set -euo pipefail
+
+          app_version="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' appinfo/info.xml | head -n1)"
+          test -n "$app_version"
+
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "app_release_tag=v$app_version" >> "$GITHUB_OUTPUT"
 
       - name: Set up Nextcloud server
         uses: SMillerDev/nextcloud-actions/setup-nextcloud@a1964c2cf903781e17b965a0938a70c694379c42
@@ -124,7 +138,7 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
           asset_name: ${{ env.APP_ID }}.tar.gz
-          tag: ${{ github.ref}}
+          tag: ${{ needs.build.outputs.app_release_tag }}
           release_name: "Development build (${{ env.SHORT_SHA }})"
           prerelease: true
           overwrite: true
@@ -219,7 +233,7 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
           asset_name: ${{ env.APP_ID }}.tar.gz
-          tag: ${{ github.ref }}
+          tag: ${{ needs.build.outputs.app_release_tag }}
           overwrite: true
 
       - name: Publish to Nextcloud App Store
