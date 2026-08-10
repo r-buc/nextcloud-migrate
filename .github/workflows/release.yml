@@ -124,7 +124,7 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ${{ runner.temp }}/${{ env.APP_ID }}.tar.gz
           asset_name: ${{ env.APP_ID }}.tar.gz
-          tag: dev
+          tag: ${{ github.ref}}
           release_name: "Development build (${{ env.SHORT_SHA }})"
           prerelease: true
           overwrite: true
@@ -213,7 +213,7 @@ jobs:
           tar -czf "$archive_path" -C "$build_root" "$APP_ID"
 
       - name: Upload signed app tarball to GitHub release
-        id: upload_release_asset
+        id: NightlyReleaseUpload
         uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
