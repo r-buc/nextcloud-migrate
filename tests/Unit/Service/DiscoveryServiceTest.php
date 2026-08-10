@@ -154,6 +154,31 @@ final class DiscoveryServiceTest extends TestCase {
 		self::assertSame(501, $stats['files']);
 	}
 
+	public function testDiscoverUserDoesNotStopAfterAFirstPageShortByExactlyTheRootRow(): void {
+		// Regression test: `\OC\Files\Node\Folder::search()` applies the
+		// SQL LIMIT/OFFSET *before* stripping the folder's own row from
+		// the results (it always matches and always sorts first), so a
+		// full scan's first page comes back with exactly BATCH_SIZE - 1
+		// (499) real nodes whenever the folder has >= BATCH_SIZE real
+		// entries - not because it's actually the last page. Treating a
+		// 499-node first page as "short enough to be last" silently
+		// dropped every file beyond it for any user with >= 500 files.
+		$firstPage = [];
+		for ($i = 0; $i < 499; $i++) {
+			$firstPage[] = $this->makeFile("/alice/files/file{$i}.txt", $i, 10, 1000);
+		}
+		$secondPage = [$this->makeFile('/alice/files/extra.txt', 999, 10, 1000)];
+
+		$root = $this->createMock(Folder::class);
+		$root->method('getPath')->willReturn('/alice/files');
+		$root->expects($this->exactly(2))->method('search')->willReturnOnConsecutiveCalls($firstPage, $secondPage);
+		$this->rootFolder->method('getUserFolder')->willReturn($root);
+
+		$stats = $this->discoveryService->discoverUser(1, $this->userMap, 'alice');
+
+		self::assertSame(500, $stats['files']);
+	}
+
 	public function testDiscoverIncrementalPassesSinceMtimeIntoTheSearchQuery(): void {
 		$root = $this->createMock(Folder::class);
 		$root->method('getPath')->willReturn('/alice/files');

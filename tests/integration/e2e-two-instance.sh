@@ -19,6 +19,14 @@
 # in the same run (fixed by scoping migrate_files' uniqueness per user_map,
 # not just per run).
 #
+# alice additionally gets 1,000 extra files (Documents/bulk/) so discovery
+# (Service\DiscoveryService, see BATCH_SIZE) is forced across multiple
+# Files-API search() pages instead of ever fitting in a single page - this
+# is what originally caught a real off-by-one where the folder's own row
+# silently consumed one of the first page's slots (see DiscoveryService's
+# walk() docblock), causing every file beyond roughly the 499th to be
+# dropped for any user with >= 500 files.
+#
 # Requirements: `podman` available directly on PATH (run this on a real
 # host, not through any sandbox-specific escape hatch). Nothing here is
 # specific to any particular development sandbox.
@@ -188,6 +196,16 @@ echo 'shared-name file, alice content' > /var/www/html/data/alice/files/Document
 podman exec "$SRC" sh -c "mkdir -p /var/www/html/data/bob/files/Documents
  echo 'hello from bob' > /var/www/html/data/bob/files/Documents/bob.txt
 echo 'shared-name file, bob content' > /var/www/html/data/bob/files/Documents/shared.txt"
+
+step "Creating 1,000 additional files for alice (exercises Search-API discovery pagination beyond a single 500-row page)"
+podman exec "$SRC" sh -c '
+	mkdir -p /var/www/html/data/alice/files/Documents/bulk
+	for i in $(seq 1 1000); do
+		n=$(printf %04d "$i")
+		echo "bulk file number $i" > "/var/www/html/data/alice/files/Documents/bulk/file_$n.txt"
+	done
+'
+
 run_occ "$SRC" files:scan alice >/dev/null
 run_occ "$SRC" files:scan bob >/dev/null
 
@@ -220,14 +238,19 @@ pass "run created (id=$RUN_ID) - alice account should now exist on target, bob's
 
 step "Dry run (validate target user credentials + discover files)"
 api_call POST "/runs/$RUN_ID/dry-run" >/dev/null
-drain_jobs_until "$RUN_ID" 30 dry_run_ready validation_failed
+# Higher than the ~handful-of-files case needs: discovering alice's 1,000+
+# bulk files spans several Search-API pages/DiscoveryJob ticks.
+drain_jobs_until "$RUN_ID" 90 dry_run_ready validation_failed
 STATE="$(api_get "/runs/$RUN_ID" | grep -oP '"state":"\K[^"]+')"
 [[ "$STATE" == "dry_run_ready" ]] || fail "run did not reach dry_run_ready (state=$STATE) - check per-user credential validation"
 pass "dry run succeeded: both auto-created/reset credentials validated over WebDAV"
 
 step "Approving and running the migration to completion"
 api_call POST "/runs/$RUN_ID/approve" >/dev/null
-drain_jobs_until "$RUN_ID" 60 completed completed_with_errors failed
+# Higher than the ~handful-of-files case needs: transferring/verifying
+# alice's 1,000+ bulk files takes more worker-job ticks even though each
+# tick processes many files in a loop (see TransferWorkerJob::run()).
+drain_jobs_until "$RUN_ID" 120 completed completed_with_errors failed
 STATE="$(api_get "/runs/$RUN_ID" | grep -oP '"state":"\K[^"]+')"
 [[ "$STATE" == "completed" ]] || fail "run finished in state '$STATE', expected 'completed'"
 pass "run completed"
@@ -263,13 +286,29 @@ BOB_SHARED_TGT_SUM="$(podman exec "$TGT" sha256sum /var/www/html/data/bob/files/
 [[ "$ALICE_SHARED_SRC_SUM" != "$BOB_SHARED_SRC_SUM" ]] || fail "test data bug: alice/bob shared.txt should differ in content"
 pass "duplicate-named Documents/shared.txt migrated correctly and distinctly for both users"
 
+step "Verifying alice's 1,000 bulk files all migrated (Search-API discovery pagination)"
+ALICE_BULK_SRC_COUNT="$(podman exec "$SRC" sh -c 'ls /var/www/html/data/alice/files/Documents/bulk | wc -l')"
+ALICE_BULK_TGT_COUNT="$(podman exec "$TGT" sh -c 'ls /var/www/html/data/alice/files/Documents/bulk 2>/dev/null | wc -l')"
+[[ "$ALICE_BULK_SRC_COUNT" == "1000" ]] || fail "test setup bug: expected 1000 source bulk files, found $ALICE_BULK_SRC_COUNT"
+[[ "$ALICE_BULK_TGT_COUNT" == "$ALICE_BULK_SRC_COUNT" ]] || fail "bulk file count mismatch: source=$ALICE_BULK_SRC_COUNT target=$ALICE_BULK_TGT_COUNT (pagination likely dropped files beyond the first Search-API page - see DiscoveryService::walk())"
+ALICE_BULK_SRC_SUMS="$(podman exec "$SRC" sh -c 'sha256sum /var/www/html/data/alice/files/Documents/bulk/*.txt' | awk '{print $1}' | sort)"
+ALICE_BULK_TGT_SUMS="$(podman exec "$TGT" sh -c 'sha256sum /var/www/html/data/alice/files/Documents/bulk/*.txt' | awk '{print $1}' | sort)"
+[[ "$ALICE_BULK_SRC_SUMS" == "$ALICE_BULK_TGT_SUMS" ]] || fail "bulk file checksum set mismatch between source and target"
+pass "all 1,000 bulk files migrated with matching checksums (multi-page discovery verified)"
+
 step "Structural comparison: ls -lR of each user's Documents/ on source vs target"
 # Strip "total N" block-count summary lines (filesystem-dependent noise, not
-# meaningful for correctness) before diffing; everything else (names, sizes,
-# perms, and mtimes - preserved via X-OC-MTime - is expected to match exactly.
+# meaningful for correctness) and directory entries' own listing lines
+# (a folder's own mtime/size, as listed in its parent's output, is
+# filesystem housekeeping metadata that legitimately updates every time a
+# child is added - it will genuinely differ from the source once a folder
+# has many children arriving one-by-one over time via WebDAV instead of
+# all at once, even though every file inside it is correct) before
+# diffing; everything else (file names, sizes, perms, and mtimes -
+# preserved via X-OC-MTime - is expected to match exactly.
 for user in alice bob; do
-	SRC_LISTING="$(podman exec "$SRC" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ')"
-	TGT_LISTING="$(podman exec "$TGT" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ')"
+	SRC_LISTING="$(podman exec "$SRC" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ' | grep -v '^d')"
+	TGT_LISTING="$(podman exec "$TGT" sh -c "ls -lR /var/www/html/data/$user/files/Documents" | grep -v '^total ' | grep -v '^d')"
 	if [[ "$SRC_LISTING" != "$TGT_LISTING" ]]; then
 		echo "--- source ($user) ---"
 		echo "$SRC_LISTING"

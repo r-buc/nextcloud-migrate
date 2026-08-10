@@ -231,7 +231,24 @@ class DiscoveryService {
 				yield $node;
 			}
 
-			if (count($nodes) < self::BATCH_SIZE) {
+			// `\OC\Files\Node\Folder::search()` applies the SQL-level
+			// LIMIT/OFFSET *before* stripping the folder's own row from
+			// the results (it always matches the jail's "path = root"
+			// clause, and sorts first since a prefix always sorts before
+			// anything it's a prefix of). On the very first page only
+			// (offset 0), for a full scan (`mtime >= 0`, which the root
+			// folder's own mtime always satisfies) that silently eats one
+			// of the BATCH_SIZE raw slots, capping this page's real yield
+			// at BATCH_SIZE - 1 even when many more real files remain.
+			// Without this adjustment, a folder with >= BATCH_SIZE real
+			// entries would have every entry past the first ~499 silently
+			// dropped. Using a one-lower threshold only for the first
+			// page costs at most one extra, cheap empty-page query at the
+			// very end when the true count happens to land exactly on
+			// this boundary (or when $sinceMtime excludes the root row
+			// anyway, e.g. during an incremental sync).
+			$shortPageThreshold = $offset === 0 ? self::BATCH_SIZE - 1 : self::BATCH_SIZE;
+			if (count($nodes) < $shortPageThreshold) {
 				return;
 			}
 			$offset += self::BATCH_SIZE;
