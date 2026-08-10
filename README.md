@@ -32,8 +32,17 @@ ACLs.
   user in the admin UI:
   - **auto** (default): the target account is created (if it doesn't exist
     yet) or has its password reset (if it does) via the admin credential,
-    so no manual per-user password is needed. Intended for migrations where
-    target accounts are freshly provisioned/initial.
+    then that (temporary) account password is immediately exchanged for a
+    dedicated app password (`Service\ProvisioningClient::generateAppPassword()`,
+    the same `core/getapppassword` mechanism a real desktop/mobile client
+    login flow ultimately mints) - so no manual per-user password is
+    needed, AND the target user's account password can be changed again
+    afterwards (by them, or by a later re-run of this same flow for a
+    different run) without invalidating an in-progress migration or an
+    active continuous sync: app password tokens are independent auth
+    entries, not derived from the account password used to create them.
+    Intended for migrations where target accounts are freshly
+    provisioned/initial.
   - **manual** ("expert mode"): the admin supplies an app password they
     already obtained from that specific target user, without touching the
     target account via the admin API at all.

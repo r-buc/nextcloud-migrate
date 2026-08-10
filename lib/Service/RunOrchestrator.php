@@ -74,9 +74,14 @@ class RunOrchestrator {
 	 *        mode defaults to 'auto': the target user is created (if it
 	 *        doesn't exist on the remote instance yet) or has its password
 	 *        reset (if it does) via the OCS Provisioning API, using the
-	 *        instance's admin credential - no manual per-user app password
-	 *        needed. mode 'manual' ("expert mode") uses an app password the
-	 *        admin already obtained from that specific target user instead,
+	 *        instance's admin credential, then that (temporary) account
+	 *        password is immediately exchanged for a dedicated app
+	 *        password (see ProvisioningClient::generateAppPassword()) - no
+	 *        manual per-user app password needed, and the target user's
+	 *        account password can be changed again afterwards without
+	 *        affecting an in-progress migration or continuous sync. mode
+	 *        'manual' ("expert mode") uses an app password the admin
+	 *        already obtained from that specific target user instead,
 	 *        without touching their account via the admin API at all.
 	 * @param bool $skipVerification if true, the post-transfer verification
 	 *        phase (re-downloading every file from the target to compare
@@ -126,12 +131,19 @@ class RunOrchestrator {
 					$remoteUsers = array_flip($this->provisioningClient->listUsers($instance, $instance->getAdminUserId(), $adminPassword));
 				}
 				$adminPassword ??= $this->credentialService->decrypt($instance->getAdminAppPasswordEncrypted());
-				$appPassword = bin2hex(random_bytes(24));
+				$temporaryPassword = bin2hex(random_bytes(24));
 				if (isset($remoteUsers[$targetUserId])) {
-					$this->provisioningClient->resetUserPassword($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $appPassword);
+					$this->provisioningClient->resetUserPassword($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $temporaryPassword);
 				} else {
-					$this->provisioningClient->createUser($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $appPassword);
+					$this->provisioningClient->createUser($instance, $instance->getAdminUserId(), $adminPassword, $targetUserId, $temporaryPassword);
 				}
+				// Immediately exchange the temporary account password for
+				// a dedicated app password: this, not the temporary
+				// account password itself, is what gets stored/used for
+				// every subsequent WebDAV/OCS call, so the target user's
+				// account password can be changed later without
+				// affecting an in-progress migration or continuous sync.
+				$appPassword = $this->provisioningClient->generateAppPassword($instance, $targetUserId, $temporaryPassword);
 			} else {
 				throw new \InvalidArgumentException("Unknown mapping mode '{$mode}'");
 			}

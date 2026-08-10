@@ -10,14 +10,20 @@ use OCA\NextcloudMigrate\Exception\RemoteConnectionException;
 /**
  * Talks to the TARGET instance's OCS Provisioning API using the admin
  * credential stored on RemoteInstance (adminUserId + encrypted app
- * password). This is the ONE place that credential is used - never for
- * WebDAV file transfer (see RemoteInstance docblock for why).
+ * password) for user creation/password reset/listing - never for WebDAV
+ * file transfer (see RemoteInstance docblock for why). `generateAppPassword()`
+ * is the one exception: it authenticates as the TARGET user's own
+ * (temporary) account credential instead of the admin's, to mint that
+ * user's dedicated app password token.
  *
  * Backs the default "auto" user-mapping mode: create the target user
- * account if it doesn't exist yet, or reset its password if it does, so a
- * per-file-transfer app password is always available without the admin
- * having to obtain it manually from each target user (see "expert mode"
- * for that manual path).
+ * account if it doesn't exist yet, or reset its password if it does, then
+ * immediately exchange that (temporary) account password for a dedicated
+ * app password via `generateAppPassword()` - so a per-file-transfer app
+ * password is always available without the admin having to obtain one
+ * manually from each target user (see "expert mode" for that manual
+ * path), and so the account password can be changed again afterwards
+ * without invalidating an in-progress migration or continuous sync.
  */
 class ProvisioningClient {
 	private const REQUEST_TIMEOUT = 30;
@@ -70,6 +76,37 @@ class ProvisioningClient {
 			'key' => 'password',
 			'value' => $newPassword,
 		]);
+	}
+
+	/**
+	 * Exchanges a target user's own current account credential (typically
+	 * a temporary password just set via createUser()/resetUserPassword())
+	 * for a dedicated, independent app password token
+	 * (`core/getapppassword` - the same mechanism a real desktop/mobile
+	 * client login flow ultimately mints, and the one exposed in that
+	 * user's own "Devices & sessions" settings). This call authenticates
+	 * as the TARGET user, not the admin - unlike every other method here.
+	 *
+	 * Used so ongoing transfer/verification/continuous-sync only ever
+	 * depends on this dedicated token, never on the account password
+	 * itself: app password tokens are independent auth entries
+	 * (`oc_authtoken` rows), not derived from the account password used to
+	 * create them, so the target user's account password can be changed
+	 * afterwards (by them, or by a later re-run of the auto flow for a
+	 * different run) without invalidating an in-progress migration or an
+	 * active continuous sync.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function generateAppPassword(RemoteInstance $instance, string $targetUserId, string $accountPassword): string {
+		$data = $this->request('GET', $instance, $targetUserId, $accountPassword, 'core/getapppassword', []);
+
+		$appPassword = $data['ocs']['data']['apppassword'] ?? null;
+		if (!is_string($appPassword) || $appPassword === '') {
+			throw new RemoteConnectionException('Unexpected response generating an app password', 0);
+		}
+
+		return $appPassword;
 	}
 
 	/**
