@@ -10,7 +10,7 @@ Nextcloud instance over WebDAV. Supports dry-run analysis, resumable
 background transfer, and per-file verification. v1 scope covers file
 content, folder structure, and modification time only.
     ]]></description>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <licence>agpl</licence>
     <author>Nextcloud Migrate Contributors</author>
     <namespace>NextcloudMigrate</namespace>
