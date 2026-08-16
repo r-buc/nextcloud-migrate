@@ -143,6 +143,114 @@ class WebDavClient {
 	}
 
 	/**
+	 * Raw GET of a DAV resource (used for contacts/calendars - vCard/
+	 * iCalendar object content - rather than Files, which use stat()/
+	 * fetchSha256() instead). $davPath is relative to remote.php/dav/, e.g.
+	 * 'addressbooks/users/alice/contacts/123.vcf'.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function getRaw(RemoteInstance $instance, string $targetUserId, string $appPassword, string $davPath): string {
+		$uri = $this->buildRawUri($instance, $davPath);
+
+		try {
+			$response = $this->execute('GET', $uri, $this->baseOptions($instance, $targetUserId, $appPassword));
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			throw new RemoteConnectionException("GET failed for '{$davPath}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+
+		return $response['body'];
+	}
+
+	/**
+	 * Raw PUT of a DAV resource with an explicit content type (vCard/
+	 * iCalendar) - distinct from putFile(), which is Files-specific
+	 * (mtime/checksum headers, chunked upload support).
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function putRaw(RemoteInstance $instance, string $targetUserId, string $appPassword, string $davPath, string $content, string $contentType): void {
+		$uri = $this->buildRawUri($instance, $davPath);
+
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
+		$options['headers']['Content-Type'] = $contentType;
+		$options['body'] = $content;
+
+		try {
+			$this->execute('PUT', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			throw new RemoteConnectionException("PUT failed for '{$davPath}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+	}
+
+	/**
+	 * Creates a CardDAV address book collection via extended MKCOL (RFC
+	 * 5689 + the carddav:addressbook resourcetype, RFC 6352). Idempotent:
+	 * an already-existing collection (405) is treated as success.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function makeAddressBook(RemoteInstance $instance, string $targetUserId, string $appPassword, string $davPath, string $displayName): void {
+		$uri = $this->buildRawUri($instance, $davPath);
+		$body = '<?xml version="1.0" encoding="utf-8"?>'
+			. '<d:mkcol xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">'
+			. '<d:set><d:prop>'
+			. '<d:resourcetype><d:collection/><card:addressbook/></d:resourcetype>'
+			. '<d:displayname>' . $this->escapeXml($displayName) . '</d:displayname>'
+			. '</d:prop></d:set></d:mkcol>';
+
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
+		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
+		$options['body'] = $body;
+
+		try {
+			$this->execute('MKCOL', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			if ($status === 405) {
+				return;
+			}
+			throw new RemoteConnectionException("Failed to create addressbook '{$davPath}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+	}
+
+	/**
+	 * Creates a CalDAV calendar collection via the dedicated MKCALENDAR
+	 * method (RFC 4791). Idempotent: an already-existing collection (405)
+	 * is treated as success.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function makeCalendar(RemoteInstance $instance, string $targetUserId, string $appPassword, string $davPath, string $displayName): void {
+		$uri = $this->buildRawUri($instance, $davPath);
+		$body = '<?xml version="1.0" encoding="utf-8"?>'
+			. '<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+			. '<d:set><d:prop>'
+			. '<d:displayname>' . $this->escapeXml($displayName) . '</d:displayname>'
+			. '</d:prop></d:set></c:mkcalendar>';
+
+		$options = $this->baseOptions($instance, $targetUserId, $appPassword);
+		$options['headers']['Content-Type'] = 'application/xml; charset=utf-8';
+		$options['body'] = $body;
+
+		try {
+			$this->execute('MKCALENDAR', $uri, $options);
+		} catch (\Exception $e) {
+			$status = $this->statusFromException($e);
+			if ($status === 405) {
+				return;
+			}
+			throw new RemoteConnectionException("Failed to create calendar '{$davPath}': " . $e->getMessage(), $status ?? 0, $e);
+		}
+	}
+
+	private function escapeXml(string $value): string {
+		return htmlspecialchars($value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+	}
+
+	/**
 	 * Streams a local resource to the target path via PUT. Preserves mtime
 	 * via the X-OC-MTime header and, when available, asks the server to
 	 * validate content integrity via the OC-Checksum header.
@@ -458,6 +566,18 @@ XML;
 		$encodedPath = implode('/', array_map('rawurlencode', explode('/', ltrim($path, '/'))));
 
 		return "{$base}/remote.php/dav/files/{$user}/{$encodedPath}";
+	}
+
+	/**
+	 * Generic remote.php/dav/ URI builder for non-Files collections
+	 * (addressbooks/calendars) - $davPath is relative to remote.php/dav/,
+	 * e.g. 'addressbooks/users/alice/contacts/123.vcf'.
+	 */
+	private function buildRawUri(RemoteInstance $instance, string $davPath): string {
+		$base = rtrim($instance->getUrl(), '/');
+		$encodedPath = implode('/', array_map('rawurlencode', explode('/', ltrim($davPath, '/'))));
+
+		return "{$base}/remote.php/dav/{$encodedPath}";
 	}
 
 	/**

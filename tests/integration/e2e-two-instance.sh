@@ -108,6 +108,38 @@ drain_jobs_until() {
 	fail "run $run_id did not reach [${terminal_states[*]}] within $max_rounds rounds (stuck at '$state')"
 }
 
+# Like drain_jobs_until(), but waits for a specific event_type to appear in
+# the run's event log instead of a run-state transition - needed for
+# SharesWorkerJob, which only starts syncing a user's shares once that
+# user's files have settled (see RunOrchestrator::isUserFilesSettled()),
+# which can happen at essentially the same moment the run itself reaches
+# a terminal state. Without this separate wait, the outer drain loop could
+# stop (run already "completed") one round before SharesWorkerJob's
+# now-unblocked queued execution actually runs.
+drain_jobs_until_event() {
+	local run_id="$1"
+	local max_rounds="$2"
+	local event_type="$3"
+	local round job_ids id
+
+	for round in $(seq 1 "$max_rounds"); do
+		if api_get "/runs/$run_id/events" | grep -q "$event_type"; then
+			return 0
+		fi
+
+		job_ids="$(run_occ "$SRC" background-job:list 2>/dev/null | grep 'NextcloudMigrate' | grep -v 'null' | awk -F'|' '{print $2}' | tr -d ' ')"
+		if [[ -z "$job_ids" ]]; then
+			sleep 1
+			continue
+		fi
+		for id in $job_ids; do
+			run_occ "$SRC" background-job:execute --force-execute "$id" >/dev/null 2>&1 || true
+		done
+	done
+
+	fail "event '$event_type' did not appear for run $run_id within $max_rounds rounds"
+}
+
 # --- REST API helpers (browser-session simulation, same flow admin.js uses) ---
 
 login_admin() {
@@ -220,6 +252,59 @@ run_occ "$SRC" user:setting bob files quota "2 GB" >/dev/null
 run_occ "$SRC" user:setting bob core lang fr >/dev/null
 pass "source profile fields set for alice and bob"
 
+step "Seeding a CardDAV addressbook + contacts for alice (for contacts migration test)"
+run_occ "$SRC" dav:create-addressbook alice friends >/dev/null
+podman exec "$SRC" sh -c "cat > /tmp/card1.vcf << 'EOF'
+BEGIN:VCARD
+VERSION:3.0
+UID:friend-one-uid
+FN:Friend One
+EMAIL:friend.one@example.com
+END:VCARD
+EOF"
+podman exec "$SRC" sh -c "cat > /tmp/card2.vcf << 'EOF'
+BEGIN:VCARD
+VERSION:3.0
+UID:friend-two-uid
+FN:Friend Two
+EMAIL:friend.two@example.com
+END:VCARD
+EOF"
+podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X PUT -H 'Content-Type: text/vcard' --data-binary @/tmp/card1.vcf http://localhost/remote.php/dav/addressbooks/users/alice/friends/card1.vcf" | grep -qE '^20[0-9]$' || fail "failed to seed card1.vcf via CardDAV"
+podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X PUT -H 'Content-Type: text/vcard' --data-binary @/tmp/card2.vcf http://localhost/remote.php/dav/addressbooks/users/alice/friends/card2.vcf" | grep -qE '^20[0-9]$' || fail "failed to seed card2.vcf via CardDAV"
+pass "seeded 2 contacts in alice's 'friends' addressbook"
+
+step "Seeding a CalDAV calendar + event for alice (for calendar migration test)"
+run_occ "$SRC" dav:create-calendar alice work >/dev/null
+podman exec "$SRC" sh -c "cat > /tmp/event1.ics << 'EOF'
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//e2e-test//EN
+BEGIN:VEVENT
+UID:event-one-uid
+DTSTAMP:20260101T000000Z
+DTSTART:20260101T100000Z
+DTEND:20260101T110000Z
+SUMMARY:Team meeting
+END:VEVENT
+END:VCALENDAR
+EOF"
+podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X PUT -H 'Content-Type: text/calendar' --data-binary @/tmp/event1.ics http://localhost/remote.php/dav/calendars/alice/work/event1.ics" | grep -qE '^20[0-9]$' || fail "failed to seed event1.ics via CalDAV"
+pass "seeded 1 event in alice's 'work' calendar"
+
+step "Seeding shares for alice (for shares migration test)"
+# 'charlie' exists on source but is deliberately NOT included in the
+# migration run's user mappings below, to exercise the unmappable-
+# recipient skip-with-warning path.
+podman exec -u www-data -e OC_PASS=CharlieTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env charlie >/dev/null
+SHARE_LINK_STATUS="$(podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X POST http://localhost/ocs/v1.php/apps/files_sharing/api/v1/shares -H 'OCS-APIRequest: true' -d 'path=/Documents/alice.txt' -d 'shareType=3' -d 'permissions=1'")"
+[[ "$SHARE_LINK_STATUS" =~ ^20[0-9]$ ]] || fail "failed to create link share (status=$SHARE_LINK_STATUS)"
+SHARE_BOB_STATUS="$(podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X POST http://localhost/ocs/v1.php/apps/files_sharing/api/v1/shares -H 'OCS-APIRequest: true' -d 'path=/Documents/alice.txt' -d 'shareType=0' -d 'shareWith=bob' -d 'permissions=1'")"
+[[ "$SHARE_BOB_STATUS" =~ ^20[0-9]$ ]] || fail "failed to create user share to bob (status=$SHARE_BOB_STATUS)"
+SHARE_CHARLIE_STATUS="$(podman exec "$SRC" sh -c "curl -s -o /dev/null -w '%{http_code}' -u alice:AliceTestPassphrase2026xyz -X POST http://localhost/ocs/v1.php/apps/files_sharing/api/v1/shares -H 'OCS-APIRequest: true' -d 'path=/Documents/alice.txt' -d 'shareType=0' -d 'shareWith=charlie' -d 'permissions=1'")"
+[[ "$SHARE_CHARLIE_STATUS" =~ ^20[0-9]$ ]] || fail "failed to create user share to charlie (status=$SHARE_CHARLIE_STATUS)"
+pass "seeded 3 shares for alice's Documents/alice.txt (link, user->bob, user->charlie)"
+
 step "Pre-creating 'bob' on the target (to exercise auto-RESET), leaving 'alice' absent (to exercise auto-CREATE)"
 podman exec -u www-data -e OC_PASS=BobExistingTargetPassphrase2026 "$TGT" php /var/www/html/occ user:add --password-from-env bob
 
@@ -242,7 +327,7 @@ echo "$LOCAL_USERS" | grep -q '"id":"bob"' || fail "bob missing from /local-user
 pass "local user list includes alice and bob"
 
 step "Creating migration run (both users in default 'auto' mode)"
-RUN_BODY="$(api_call POST /runs '{"collisionStrategy":"rename","userMappings":[{"sourceUserId":"alice","targetUserId":"alice","mode":"auto"},{"sourceUserId":"bob","targetUserId":"bob","mode":"auto"}],"migrateUserInfo":true}')"
+RUN_BODY="$(api_call POST /runs '{"collisionStrategy":"rename","userMappings":[{"sourceUserId":"alice","targetUserId":"alice","mode":"auto"},{"sourceUserId":"bob","targetUserId":"bob","mode":"auto"}],"migrateUserInfo":true,"migrateContacts":true,"migrateCalendars":true,"migrateShares":true}')"
 RUN_ID="$(echo "$RUN_BODY" | grep -oP '"id":\K[0-9]+' | head -1)"
 [[ -n "$RUN_ID" ]] || fail "createRun failed: $RUN_BODY"
 pass "run created (id=$RUN_ID) - alice account should now exist on target, bob's password should be reset"
@@ -265,6 +350,10 @@ drain_jobs_until "$RUN_ID" 120 completed completed_with_errors failed
 STATE="$(api_get "/runs/$RUN_ID" | grep -oP '"state":"\K[^"]+')"
 [[ "$STATE" == "completed" ]] || fail "run finished in state '$STATE', expected 'completed'"
 pass "run completed"
+
+step "Waiting for shares sync to finish (gated on file transfer, may lag the run's own 'completed' state by a round)"
+drain_jobs_until_event "$RUN_ID" 20 "shares_sync_completed"
+pass "shares_sync_completed event recorded"
 
 step "Verifying migrated files on the target instance"
 run_occ "$TGT" files:scan alice >/dev/null
@@ -348,6 +437,59 @@ step "Verifying user info sync events were recorded"
 EVENTS_BODY="$(api_get "/runs/$RUN_ID/events")"
 echo "$EVENTS_BODY" | grep -q 'user_info_sync_completed' || fail "user_info_sync_completed event not found: $EVENTS_BODY"
 pass "user_info_sync_completed event recorded"
+
+step "Verifying contacts migration (CardDAV)"
+echo "$EVENTS_BODY" | grep -q 'contacts_sync_completed' || fail "contacts_sync_completed event not found: $EVENTS_BODY"
+pass "contacts_sync_completed event recorded"
+# alice's target account uses an auto-generated app password unknown to this
+# script, and there is no admin bypass over CardDAV (see WebDavClient's
+# docblock), so the migrated vCards can't be fetched via a normal CardDAV
+# request here. Query the target's SQLite database directly instead (via
+# PHP's bundled pdo_sqlite, no Nextcloud bootstrap needed) - equivalent to
+# what CardDavBackend itself reads from.
+TGT_CARDS_COUNT="$(podman exec "$TGT" php -r '
+$pdo = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$stmt = $pdo->query("SELECT COUNT(*) FROM oc_cards WHERE uid IN (\"friend-one-uid\", \"friend-two-uid\")");
+echo $stmt->fetchColumn();
+')"
+[[ "$TGT_CARDS_COUNT" == "2" ]] || fail "expected 2 migrated contacts on target, found '$TGT_CARDS_COUNT'"
+pass "both contacts (friend-one-uid, friend-two-uid) landed in alice's addressbook on target"
+
+step "Verifying calendar migration (CalDAV)"
+echo "$EVENTS_BODY" | grep -q 'calendars_sync_completed' || fail "calendars_sync_completed event not found: $EVENTS_BODY"
+pass "calendars_sync_completed event recorded"
+TGT_EVENTS_COUNT="$(podman exec "$TGT" php -r '
+$pdo = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$stmt = $pdo->query("SELECT COUNT(*) FROM oc_calendarobjects WHERE uid = \"event-one-uid\"");
+echo $stmt->fetchColumn();
+')"
+[[ "$TGT_EVENTS_COUNT" == "1" ]] || fail "expected 1 migrated calendar event on target, found '$TGT_EVENTS_COUNT'"
+pass "event-one-uid landed in alice's 'work' calendar on target"
+
+step "Verifying shares migration (OCS Share API)"
+echo "$EVENTS_BODY" | grep -q 'shares_sync_completed' || fail "shares_sync_completed event not found: $EVENTS_BODY"
+pass "shares_sync_completed event recorded"
+TGT_LINK_SHARES="$(podman exec "$TGT" php -r '
+$pdo = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$stmt = $pdo->query("SELECT COUNT(*) FROM oc_share s JOIN oc_filecache fc ON s.file_source = fc.fileid WHERE s.uid_owner = \"alice\" AND s.share_type = 3 AND fc.path LIKE \"%alice.txt\"");
+echo $stmt->fetchColumn();
+')"
+[[ "$TGT_LINK_SHARES" == "1" ]] || fail "expected 1 migrated link share on target, found '$TGT_LINK_SHARES'"
+TGT_BOB_SHARES="$(podman exec "$TGT" php -r '
+$pdo = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$stmt = $pdo->query("SELECT COUNT(*) FROM oc_share s JOIN oc_filecache fc ON s.file_source = fc.fileid WHERE s.uid_owner = \"alice\" AND s.share_type = 0 AND s.share_with = \"bob\" AND fc.path LIKE \"%alice.txt\"");
+echo $stmt->fetchColumn();
+')"
+[[ "$TGT_BOB_SHARES" == "1" ]] || fail "expected 1 migrated user share to bob on target, found '$TGT_BOB_SHARES'"
+pass "link share and user share (alice -> bob) both migrated to target"
+TGT_CHARLIE_SHARES="$(podman exec "$TGT" php -r '
+$pdo = new PDO("sqlite:/var/www/html/data/nextcloud.db");
+$stmt = $pdo->query("SELECT COUNT(*) FROM oc_share WHERE share_with = \"charlie\"");
+echo $stmt->fetchColumn();
+')"
+[[ "$TGT_CHARLIE_SHARES" == "0" ]] || fail "share to unmapped user 'charlie' should NOT have been migrated, found $TGT_CHARLIE_SHARES"
+echo "$EVENTS_BODY" | grep -q 'share_recipient_unmapped' || fail "share_recipient_unmapped warning event not found: $EVENTS_BODY"
+pass "share to unmapped user 'charlie' correctly skipped with a warning event"
 
 step "Cleaning up"
 podman rm -f -v "$SRC" "$TGT" >/dev/null 2>&1 || true

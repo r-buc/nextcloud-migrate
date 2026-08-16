@@ -70,12 +70,46 @@ class MigrationResourceItemMapper extends QBMapper {
 	 * @return array<string,int> counts keyed by state
 	 * @throws Exception
 	 */
-	public function countByState(int $runId, string $resourceType): array {
+	public function countByState(int $runId, string $resourceType, ?string $excludeExternalId = null): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('state')
 			->selectAlias($qb->createFunction('COUNT(*)'), 'cnt')
 			->from($this->getTableName())
 			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->eq('resource_type', $qb->createNamedParameter($resourceType)))
+			->groupBy('state');
+		if ($excludeExternalId !== null) {
+			$qb->andWhere($qb->expr()->neq('external_id', $qb->createNamedParameter($excludeExternalId)));
+		}
+
+		$result = $qb->executeQuery();
+		$counts = [];
+		while ($row = $result->fetch()) {
+			$counts[$row['state']] = (int)$row['cnt'];
+		}
+		$result->closeCursor();
+
+		return $counts;
+	}
+
+	/**
+	 * Per-user variant of countByState(), used by each ResourceMigratorInterface
+	 * implementation's isRunComplete() to check whether a specific mapped
+	 * user still has pending work (contacts/calendars/shares can
+	 * legitimately have zero items for a user, so a plain "no rows" check
+	 * can't tell "nothing to do" apart from "not discovered yet" - callers
+	 * pair this with a discovery marker row for that).
+	 *
+	 * @return array<string,int> counts keyed by state
+	 * @throws Exception
+	 */
+	public function countByStateForUser(int $runId, int $userMapId, string $resourceType): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('state')
+			->selectAlias($qb->createFunction('COUNT(*)'), 'cnt')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)))
 			->andWhere($qb->expr()->eq('resource_type', $qb->createNamedParameter($resourceType)))
 			->groupBy('state');
 
@@ -87,6 +121,28 @@ class MigrationResourceItemMapper extends QBMapper {
 		$result->closeCursor();
 
 		return $counts;
+	}
+
+	/**
+	 * Pending (not yet synced/failed) items for a specific mapped user -
+	 * used by each resource type's worker job to process one user's
+	 * remaining work within a batch execution.
+	 *
+	 * @return MigrationResourceItem[]
+	 * @throws Exception
+	 */
+	public function findPendingForUser(int $runId, int $userMapId, string $resourceType, int $limit = 500): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('*')
+			->from($this->getTableName())
+			->where($qb->expr()->eq('run_id', $qb->createNamedParameter($runId)))
+			->andWhere($qb->expr()->eq('user_map_id', $qb->createNamedParameter($userMapId)))
+			->andWhere($qb->expr()->eq('resource_type', $qb->createNamedParameter($resourceType)))
+			->andWhere($qb->expr()->eq('state', $qb->createNamedParameter(MigrationResourceItem::STATE_PENDING)))
+			->setMaxResults($limit)
+			->orderBy('id', 'ASC');
+
+		return $this->findEntities($qb);
 	}
 
 	/**

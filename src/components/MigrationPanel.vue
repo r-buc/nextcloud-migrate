@@ -91,6 +91,33 @@
 					the admin credential already configured above, independently of
 					and in parallel with the file transfer below.
 				</p>
+				<NcCheckboxRadioSwitch v-model="form.migrateContacts">
+					Also migrate contacts (address books owned by each user)
+				</NcCheckboxRadioSwitch>
+				<p class="settings-hint">
+					Syncs each mapped user's own address books and contacts via
+					CardDAV, independently of and in parallel with the file transfer
+					below. Address books shared to a user by someone else are not
+					migrated.
+				</p>
+				<NcCheckboxRadioSwitch v-model="form.migrateCalendars">
+					Also migrate calendars (calendars owned by each user)
+				</NcCheckboxRadioSwitch>
+				<p class="settings-hint">
+					Syncs each mapped user's own calendars and events via CalDAV,
+					independently of and in parallel with the file transfer below.
+					Calendars shared to a user by someone else are not migrated.
+				</p>
+				<NcCheckboxRadioSwitch v-model="form.migrateShares">
+					Also migrate shares (shares owned by each user)
+				</NcCheckboxRadioSwitch>
+				<p class="settings-hint">
+					Recreates each mapped user's own file/folder shares once their
+					files have finished transferring. A share to a user not included
+					in this run is skipped with a warning. Link-share passwords
+					can't be migrated (Nextcloud never exposes them) - recreated
+					links are left without a password.
+				</p>
 			</div>
 
 			<div class="ncm-actions">
@@ -114,6 +141,15 @@
 
 			<p v-if="userInfoProgress" class="settings-hint">
 				User info sync: {{ userInfoProgress.synced }}/{{ userInfoProgress.total }} synced{{ userInfoProgress.failed ? `, ${userInfoProgress.failed} failed` : '' }}
+			</p>
+			<p v-if="contactsProgress" class="settings-hint">
+				Contacts sync: {{ contactsProgress.synced }}/{{ contactsProgress.total }} synced{{ contactsProgress.failed ? `, ${contactsProgress.failed} failed` : '' }}
+			</p>
+			<p v-if="calendarsProgress" class="settings-hint">
+				Calendars sync: {{ calendarsProgress.synced }}/{{ calendarsProgress.total }} synced{{ calendarsProgress.failed ? `, ${calendarsProgress.failed} failed` : '' }}
+			</p>
+			<p v-if="sharesProgress" class="settings-hint">
+				Shares sync: {{ sharesProgress.synced }}/{{ sharesProgress.total }} synced{{ sharesProgress.failed ? `, ${sharesProgress.failed} failed` : '' }}
 			</p>
 
 			<table v-if="status" class="grid ncm-users-table">
@@ -298,6 +334,9 @@ export default {
 				expertMode: false,
 				skipVerification: false,
 				migrateUserInfo: false,
+				migrateContacts: false,
+				migrateCalendars: false,
+				migrateShares: false,
 			},
 			showAdvanced: false,
 			creating: false,
@@ -358,6 +397,15 @@ export default {
 		userInfoProgress() {
 			return this.status?.resourceProgress?.user_info || null
 		},
+		contactsProgress() {
+			return this.status?.resourceProgress?.contact || null
+		},
+		calendarsProgress() {
+			return this.status?.resourceProgress?.calendar || null
+		},
+		sharesProgress() {
+			return this.status?.resourceProgress?.share || null
+		},
 	},
 	mounted() {
 		this.loadLocalUsers()
@@ -417,6 +465,9 @@ export default {
 				userMappings,
 				skipVerification: this.form.skipVerification,
 				migrateUserInfo: this.form.migrateUserInfo,
+				migrateContacts: this.form.migrateContacts,
+				migrateCalendars: this.form.migrateCalendars,
+				migrateShares: this.form.migrateShares,
 			}).then((run) => {
 				this.run = run
 				this.showAdvanced = false

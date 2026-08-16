@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace OCA\NextcloudMigrate\Service;
 
 use OCA\NextcloudMigrate\BackgroundJob\DiscoveryJob;
+use OCA\NextcloudMigrate\BackgroundJob\CalendarsWorkerJob;
+use OCA\NextcloudMigrate\BackgroundJob\ContactsWorkerJob;
 use OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob;
 use OCA\NextcloudMigrate\BackgroundJob\FinalizeJob;
 use OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob;
+use OCA\NextcloudMigrate\BackgroundJob\SharesWorkerJob;
 use OCA\NextcloudMigrate\BackgroundJob\UserInfoSyncJob;
 use OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob;
 use OCA\NextcloudMigrate\Db\MigrationFile;
@@ -103,6 +106,9 @@ class RunOrchestrator {
 		array $mappings,
 		bool $skipVerification = false,
 		bool $migrateUserInfo = false,
+		bool $migrateContacts = false,
+		bool $migrateCalendars = false,
+		bool $migrateShares = false,
 	): MigrationRun {
 		if ($mappings === []) {
 			throw new \InvalidArgumentException('At least one user mapping is required');
@@ -166,9 +172,9 @@ class RunOrchestrator {
 		// these are set explicitly (never left null - see allow_self_signed
 		// comment re: notnull+default booleans) so future phases have a
 		// consistent, non-null value to build on.
-		$run->setMigrateContacts(false);
-		$run->setMigrateCalendars(false);
-		$run->setMigrateShares(false);
+		$run->setMigrateContacts($migrateContacts);
+		$run->setMigrateCalendars($migrateCalendars);
+		$run->setMigrateShares($migrateShares);
 		$run->setTotalUsers(count($resolved));
 		$run->setTotalFiles(0);
 		$run->setTransferredFiles(0);
@@ -295,6 +301,23 @@ class RunOrchestrator {
 			// Independent track, not gated on file transfer/verification - see
 			// UserInfoSyncJob's docblock for why.
 			$this->jobList->add(UserInfoSyncJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+		}
+
+		if ($run->getMigrateContacts()) {
+			$this->jobList->add(ContactsWorkerJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+		}
+
+		if ($run->getMigrateCalendars()) {
+			$this->jobList->add(CalendarsWorkerJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+		}
+
+		if ($run->getMigrateShares()) {
+			// Its own per-user gating (isUserFilesSettled()) happens inside
+			// SharesMigrationService's discovery step, not here - shares can
+			// only be recreated once the corresponding file exists on the
+			// target, so this job is spawned immediately but simply finds
+			// nothing to do yet for any user whose files haven't settled.
+			$this->jobList->add(SharesWorkerJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
 		}
 
 		return $run;
@@ -439,6 +462,68 @@ class RunOrchestrator {
 	 */
 	public function onUserInfoSyncComplete(int $runId): void {
 		$this->eventLogger->log($runId, 'user_info_sync_completed', 'User info sync finished for all mapped users');
+	}
+
+	/**
+	 * Called by ContactsWorkerJob once every mapped user's address books/
+	 * contacts have reached a terminal state for a run with
+	 * migrate_contacts enabled. Purely informational, same as
+	 * onUserInfoSyncComplete().
+	 */
+	public function onContactsSyncComplete(int $runId): void {
+		$this->eventLogger->log($runId, 'contacts_sync_completed', 'Contacts sync finished for all mapped users');
+	}
+
+	/**
+	 * Called by CalendarsWorkerJob once every mapped user's calendars have
+	 * reached a terminal state for a run with migrate_calendars enabled.
+	 * Purely informational, same as the other onXSyncComplete() hooks.
+	 */
+	public function onCalendarsSyncComplete(int $runId): void {
+		$this->eventLogger->log($runId, 'calendars_sync_completed', 'Calendars sync finished for all mapped users');
+	}
+
+	/**
+	 * Called by SharesWorkerJob once every mapped user's shares have
+	 * reached a terminal state for a run with migrate_shares enabled.
+	 * Purely informational, same as the other onXSyncComplete() hooks.
+	 */
+	public function onSharesSyncComplete(int $runId): void {
+		$this->eventLogger->log($runId, 'shares_sync_completed', 'Shares sync finished for all mapped users');
+	}
+
+	/**
+	 * Whether a specific mapped user's file transfer (and, unless
+	 * skip_verification, verification) pipeline has fully drained - i.e.
+	 * no more transferable/verifiable files remain, counting only
+	 * still-retryable failures as "remaining" (see
+	 * MigrationFileMapper::countRetryableFailures()'s docblock for why
+	 * exhausted-retry failures must count as settled). Used by
+	 * SharesMigrationService to gate share recreation on a user's files
+	 * already existing on the target - a share can't be recreated against
+	 * a file that hasn't been transferred yet.
+	 */
+	public function isUserFilesSettled(int $runId, int $userMapId): bool {
+		$run = $this->runMapper->find($runId);
+		$counts = $this->fileMapper->countByState($runId, $userMapId);
+		$retryable = $this->fileMapper->countRetryableFailures($runId, $userMapId);
+
+		$transferRemaining = ($counts[MigrationFile::STATE_DISCOVERED] ?? 0)
+			+ $retryable['transferRetryable']
+			+ ($counts[MigrationFile::STATE_TRANSFERRING] ?? 0);
+		if ($transferRemaining > 0) {
+			return false;
+		}
+
+		if ($run->getSkipVerification()) {
+			return true;
+		}
+
+		$verifyRemaining = ($counts[MigrationFile::STATE_TRANSFERRED] ?? 0)
+			+ $retryable['verificationRetryable']
+			+ ($counts[MigrationFile::STATE_VERIFYING] ?? 0);
+
+		return $verifyRemaining === 0;
 	}
 
 	/**

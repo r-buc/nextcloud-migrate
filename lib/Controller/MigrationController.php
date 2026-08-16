@@ -186,8 +186,17 @@ class MigrationController extends Controller {
 	 *        account profile (displayname, email, quota, language, groups)
 	 *        via the OCS Provisioning API, independently of file transfer.
 	 *        Defaults to false.
+	 * @param bool $migrateContacts also migrate each mapped user's own
+	 *        address books and contacts via CardDAV, independently of file
+	 *        transfer. Defaults to false.
+	 * @param bool $migrateCalendars also migrate each mapped user's own
+	 *        calendars via CalDAV, independently of file transfer. Defaults
+	 *        to false.
+	 * @param bool $migrateShares also migrate each mapped user's own shares
+	 *        (user/group/link) once their files have finished transferring.
+	 *        Defaults to false.
 	 */
-	public function createRun(string $collisionStrategy, array $userMappings, bool $skipVerification = false, bool $migrateUserInfo = false): JSONResponse {
+	public function createRun(string $collisionStrategy, array $userMappings, bool $skipVerification = false, bool $migrateUserInfo = false, bool $migrateContacts = false, bool $migrateCalendars = false, bool $migrateShares = false): JSONResponse {
 		$instances = $this->instanceMapper->findAllForOwner($this->currentUserId());
 		if ($instances === []) {
 			return new JSONResponse(['error' => 'Configure a target instance before starting a migration'], Http::STATUS_BAD_REQUEST);
@@ -198,7 +207,7 @@ class MigrationController extends Controller {
 		}
 
 		try {
-			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings, $skipVerification, $migrateUserInfo);
+			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings, $skipVerification, $migrateUserInfo, $migrateContacts, $migrateCalendars, $migrateShares);
 		} catch (\InvalidArgumentException $e) {
 			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_REQUEST);
 		} catch (RemoteConnectionException $e) {

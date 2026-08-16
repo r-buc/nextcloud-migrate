@@ -12,6 +12,9 @@ use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
 use OCA\NextcloudMigrate\Service\ResourceMigrator\UserInfoMigrationService;
+use OCA\NextcloudMigrate\Service\ResourceMigrator\ContactsMigrationService;
+use OCA\NextcloudMigrate\Service\ResourceMigrator\CalendarsMigrationService;
+use OCA\NextcloudMigrate\Service\ResourceMigrator\SharesMigrationService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Db\DoesNotExistException;
@@ -109,6 +112,33 @@ class StatusController extends Controller {
 		if ($run->getMigrateUserInfo()) {
 			$counts = $this->resourceItemMapper->countByState($runId, UserInfoMigrationService::TYPE);
 			$progress['user_info'] = [
+				'total' => array_sum($counts),
+				'synced' => $counts['synced'] ?? 0,
+				'failed' => $counts['failed'] ?? 0,
+			];
+		}
+
+		if ($run->getMigrateContacts()) {
+			$counts = $this->resourceItemMapper->countByState($runId, ContactsMigrationService::TYPE, ContactsMigrationService::MARKER_EXTERNAL_ID);
+			$progress['contact'] = [
+				'total' => array_sum($counts),
+				'synced' => $counts['synced'] ?? 0,
+				'failed' => $counts['failed'] ?? 0,
+			];
+		}
+
+		if ($run->getMigrateCalendars()) {
+			$counts = $this->resourceItemMapper->countByState($runId, CalendarsMigrationService::TYPE, CalendarsMigrationService::MARKER_EXTERNAL_ID);
+			$progress['calendar'] = [
+				'total' => array_sum($counts),
+				'synced' => $counts['synced'] ?? 0,
+				'failed' => $counts['failed'] ?? 0,
+			];
+		}
+
+		if ($run->getMigrateShares()) {
+			$counts = $this->resourceItemMapper->countByState($runId, SharesMigrationService::TYPE, SharesMigrationService::MARKER_EXTERNAL_ID);
+			$progress['share'] = [
 				'total' => array_sum($counts),
 				'synced' => $counts['synced'] ?? 0,
 				'failed' => $counts['failed'] ?? 0,
