@@ -182,8 +182,12 @@ class MigrationController extends Controller {
 	 * @param bool $skipVerification skip the post-transfer verification
 	 *        phase and rely solely on the target's upload-time OC-Checksum
 	 *        validation. Defaults to false (verification on).
+	 * @param bool $migrateUserInfo also migrate each mapped user's core
+	 *        account profile (displayname, email, quota, language, groups)
+	 *        via the OCS Provisioning API, independently of file transfer.
+	 *        Defaults to false.
 	 */
-	public function createRun(string $collisionStrategy, array $userMappings, bool $skipVerification = false): JSONResponse {
+	public function createRun(string $collisionStrategy, array $userMappings, bool $skipVerification = false, bool $migrateUserInfo = false): JSONResponse {
 		$instances = $this->instanceMapper->findAllForOwner($this->currentUserId());
 		if ($instances === []) {
 			return new JSONResponse(['error' => 'Configure a target instance before starting a migration'], Http::STATUS_BAD_REQUEST);
@@ -194,7 +198,7 @@ class MigrationController extends Controller {
 		}
 
 		try {
-			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings, $skipVerification);
+			$run = $this->runOrchestrator->createRun($this->currentUserId(), $instances[0]->getId(), $collisionStrategy, $userMappings, $skipVerification, $migrateUserInfo);
 		} catch (\InvalidArgumentException $e) {
 			return new JSONResponse(['error' => $e->getMessage()], Http::STATUS_BAD_REQUEST);
 		} catch (RemoteConnectionException $e) {

@@ -17,6 +17,14 @@ use OCP\AppFramework\Db\Entity;
  * @method void setCollisionStrategy(string $collisionStrategy)
  * @method bool getSkipVerification()
  * @method void setSkipVerification(bool $skipVerification)
+ * @method bool getMigrateUserInfo()
+ * @method void setMigrateUserInfo(bool $migrateUserInfo)
+ * @method bool getMigrateContacts()
+ * @method void setMigrateContacts(bool $migrateContacts)
+ * @method bool getMigrateCalendars()
+ * @method void setMigrateCalendars(bool $migrateCalendars)
+ * @method bool getMigrateShares()
+ * @method void setMigrateShares(bool $migrateShares)
  * @method int getTotalUsers()
  * @method void setTotalUsers(int $totalUsers)
  * @method int getTotalFiles()
@@ -88,6 +96,10 @@ class MigrationRun extends Entity implements \JsonSerializable {
 	protected $state;
 	protected $collisionStrategy;
 	protected $skipVerification;
+	protected $migrateUserInfo;
+	protected $migrateContacts;
+	protected $migrateCalendars;
+	protected $migrateShares;
 	protected $totalUsers;
 	protected $totalFiles;
 	protected $transferredFiles;
@@ -110,6 +122,10 @@ class MigrationRun extends Entity implements \JsonSerializable {
 	public function __construct() {
 		$this->addType('instanceId', 'integer');
 		$this->addType('skipVerification', 'boolean');
+		$this->addType('migrateUserInfo', 'boolean');
+		$this->addType('migrateContacts', 'boolean');
+		$this->addType('migrateCalendars', 'boolean');
+		$this->addType('migrateShares', 'boolean');
 		$this->addType('totalUsers', 'integer');
 		$this->addType('totalFiles', 'integer');
 		$this->addType('transferredFiles', 'integer');
@@ -133,6 +149,10 @@ class MigrationRun extends Entity implements \JsonSerializable {
 			'state' => $this->getState(),
 			'collisionStrategy' => $this->getCollisionStrategy(),
 			'skipVerification' => $this->getSkipVerification(),
+			'migrateUserInfo' => $this->getMigrateUserInfo(),
+			'migrateContacts' => $this->getMigrateContacts(),
+			'migrateCalendars' => $this->getMigrateCalendars(),
+			'migrateShares' => $this->getMigrateShares(),
 			'totalUsers' => $this->getTotalUsers(),
 			'totalFiles' => $this->getTotalFiles(),
 			'transferredFiles' => $this->getTransferredFiles(),

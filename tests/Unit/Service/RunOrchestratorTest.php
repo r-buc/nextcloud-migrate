@@ -7,9 +7,11 @@ namespace Tests\Unit\Service;
 use OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob;
 use OCA\NextcloudMigrate\BackgroundJob\FinalizeJob;
 use OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob;
+use OCA\NextcloudMigrate\BackgroundJob\UserInfoSyncJob;
 use OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
+use OCA\NextcloudMigrate\Db\MigrationResourceItemMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\MigrationRunMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstanceMapper;
@@ -36,6 +38,7 @@ final class RunOrchestratorTest extends TestCase {
 	private RemoteInstanceMapper $instanceMapper;
 	private UserMapMapper $userMapMapper;
 	private MigrationFileMapper $fileMapper;
+	private MigrationResourceItemMapper $resourceItemMapper;
 	private WebDavClient $webDavClient;
 	private ProvisioningClient $provisioningClient;
 	private CredentialService $credentialService;
@@ -51,6 +54,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->instanceMapper = $this->createMock(RemoteInstanceMapper::class);
 		$this->userMapMapper = $this->createMock(UserMapMapper::class);
 		$this->fileMapper = $this->createMock(MigrationFileMapper::class);
+		$this->resourceItemMapper = $this->createMock(MigrationResourceItemMapper::class);
 		$this->webDavClient = $this->createMock(WebDavClient::class);
 		$this->provisioningClient = $this->createMock(ProvisioningClient::class);
 		$this->credentialService = $this->createMock(CredentialService::class);
@@ -76,6 +80,7 @@ final class RunOrchestratorTest extends TestCase {
 			$this->instanceMapper,
 			$this->userMapMapper,
 			$this->fileMapper,
+			$this->resourceItemMapper,
 			$this->webDavClient,
 			$this->provisioningClient,
 			$this->credentialService,
@@ -127,6 +132,29 @@ final class RunOrchestratorTest extends TestCase {
 		self::assertSame('admin', $run->getApprovedBy());
 	}
 
+	public function testApproveRunAlsoEnqueuesUserInfoSyncWhenEnabled(): void {
+		$run = $this->makeRun(MigrationRun::STATE_DRY_RUN_READY);
+		$run->setMigrateUserInfo(true);
+		$this->runMapper->method('find')->willReturn($run);
+
+		$addedJobs = [];
+		$this->jobList->method('add')->willReturnCallback(function ($job, $argument) use (&$addedJobs) {
+			$addedJobs[] = $job;
+		});
+
+		$this->orchestrator->approveRun(42, 'admin');
+
+		self::assertSame([EnqueueTransfersJob::class, UserInfoSyncJob::class], $addedJobs);
+	}
+
+	public function testOnUserInfoSyncCompleteLogsEvent(): void {
+		$this->eventLogger->expects($this->once())
+			->method('log')
+			->with(42, 'user_info_sync_completed', self::isType('string'));
+
+		$this->orchestrator->onUserInfoSyncComplete(42);
+	}
+
 	public function testPauseRunRejectsFromTerminalState(): void {
 		$this->runMapper->method('find')->willReturn($this->makeRun(MigrationRun::STATE_COMPLETED));
 
@@ -171,6 +199,7 @@ final class RunOrchestratorTest extends TestCase {
 		$this->runMapper->method('find')->willReturn($run);
 
 		$this->fileMapper->expects($this->once())->method('deleteByRun')->with(42);
+		$this->resourceItemMapper->expects($this->once())->method('deleteByRun')->with(42);
 		$this->userMapMapper->expects($this->once())->method('deleteByRun')->with(42);
 		$this->eventLogger->expects($this->once())->method('deleteRunEvents')->with(42);
 		$this->runMapper->expects($this->once())->method('delete')->with($run);

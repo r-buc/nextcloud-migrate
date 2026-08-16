@@ -7,9 +7,11 @@ namespace OCA\NextcloudMigrate\Controller;
 use OCA\NextcloudMigrate\Db\MigrationEventMapper;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
+use OCA\NextcloudMigrate\Db\MigrationResourceItemMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\UserMap;
 use OCA\NextcloudMigrate\Db\UserMapMapper;
+use OCA\NextcloudMigrate\Service\ResourceMigrator\UserInfoMigrationService;
 use OCA\NextcloudMigrate\Service\RunOrchestrator;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Db\DoesNotExistException;
@@ -29,6 +31,7 @@ class StatusController extends Controller {
 		private IUserSession $userSession,
 		private RunOrchestrator $runOrchestrator,
 		private MigrationFileMapper $fileMapper,
+		private MigrationResourceItemMapper $resourceItemMapper,
 		private MigrationEventMapper $eventMapper,
 		private UserMapMapper $userMapMapper,
 	) {
@@ -87,7 +90,32 @@ class StatusController extends Controller {
 			'stateCounts' => $counts,
 			'progressPercent' => $this->calculateProgressPercent($runId, $run->getTotalFiles(), $counts, $run->getSkipVerification()),
 			'userMaps' => $userMapsOut,
+			'resourceProgress' => $this->buildResourceProgress($runId, $run),
 		]);
+	}
+
+	/**
+	 * Per-resource-type sync progress (currently just user_info - see
+	 * UserInfoMigrationService/UserInfoSyncJob), only included for types
+	 * enabled on this run. Unlike file progress, this isn't factored into
+	 * progressPercent above (see UserInfoSyncJob's docblock for why it's an
+	 * independent, non-gating track for this first resource type).
+	 *
+	 * @return array<string, array{total:int, synced:int, failed:int}>
+	 */
+	private function buildResourceProgress(int $runId, MigrationRun $run): array {
+		$progress = [];
+
+		if ($run->getMigrateUserInfo()) {
+			$counts = $this->resourceItemMapper->countByState($runId, UserInfoMigrationService::TYPE);
+			$progress['user_info'] = [
+				'total' => array_sum($counts),
+				'synced' => $counts['synced'] ?? 0,
+				'failed' => $counts['failed'] ?? 0,
+			];
+		}
+
+		return $progress;
 	}
 
 	/**

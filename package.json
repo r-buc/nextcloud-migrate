@@ -1,6 +1,6 @@
 {
   "name": "nextcloud_migrate",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Migrate a user's files 1:1 to a remote Nextcloud instance",
   "private": true,
   "license": "AGPL-3.0-or-later",

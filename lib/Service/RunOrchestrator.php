@@ -8,9 +8,11 @@ use OCA\NextcloudMigrate\BackgroundJob\DiscoveryJob;
 use OCA\NextcloudMigrate\BackgroundJob\EnqueueTransfersJob;
 use OCA\NextcloudMigrate\BackgroundJob\FinalizeJob;
 use OCA\NextcloudMigrate\BackgroundJob\TransferWorkerJob;
+use OCA\NextcloudMigrate\BackgroundJob\UserInfoSyncJob;
 use OCA\NextcloudMigrate\BackgroundJob\VerifyWorkerJob;
 use OCA\NextcloudMigrate\Db\MigrationFile;
 use OCA\NextcloudMigrate\Db\MigrationFileMapper;
+use OCA\NextcloudMigrate\Db\MigrationResourceItemMapper;
 use OCA\NextcloudMigrate\Db\MigrationRun;
 use OCA\NextcloudMigrate\Db\MigrationRunMapper;
 use OCA\NextcloudMigrate\Db\RemoteInstance;
@@ -58,6 +60,7 @@ class RunOrchestrator {
 		private RemoteInstanceMapper $instanceMapper,
 		private UserMapMapper $userMapMapper,
 		private MigrationFileMapper $fileMapper,
+		private MigrationResourceItemMapper $resourceItemMapper,
 		private WebDavClient $webDavClient,
 		private ProvisioningClient $provisioningClient,
 		private CredentialService $credentialService,
@@ -99,6 +102,7 @@ class RunOrchestrator {
 		string $collisionStrategy,
 		array $mappings,
 		bool $skipVerification = false,
+		bool $migrateUserInfo = false,
 	): MigrationRun {
 		if ($mappings === []) {
 			throw new \InvalidArgumentException('At least one user mapping is required');
@@ -157,6 +161,14 @@ class RunOrchestrator {
 		$run->setState(MigrationRun::STATE_CREATED);
 		$run->setCollisionStrategy($collisionStrategy);
 		$run->setSkipVerification($skipVerification);
+		$run->setMigrateUserInfo($migrateUserInfo);
+		// Not yet offered via the API - see Controller/MigrationController::createRun();
+		// these are set explicitly (never left null - see allow_self_signed
+		// comment re: notnull+default booleans) so future phases have a
+		// consistent, non-null value to build on.
+		$run->setMigrateContacts(false);
+		$run->setMigrateCalendars(false);
+		$run->setMigrateShares(false);
 		$run->setTotalUsers(count($resolved));
 		$run->setTotalFiles(0);
 		$run->setTransferredFiles(0);
@@ -278,6 +290,12 @@ class RunOrchestrator {
 		$this->eventLogger->log($runId, 'run_approved', "Run approved by {$approvedBy}");
 
 		$this->jobList->add(EnqueueTransfersJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+
+		if ($run->getMigrateUserInfo()) {
+			// Independent track, not gated on file transfer/verification - see
+			// UserInfoSyncJob's docblock for why.
+			$this->jobList->add(UserInfoSyncJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+		}
 
 		return $run;
 	}
@@ -410,6 +428,17 @@ class RunOrchestrator {
 		$this->eventLogger->log($runId, 'verification_completed', 'Verification pool drained; finalizing run');
 
 		$this->jobList->add(FinalizeJob::class, ['runId' => $runId], JobScheduling::IMMEDIATE_FIRST_CHECK);
+	}
+
+	/**
+	 * Called by UserInfoSyncJob once every mapped user's account profile
+	 * has reached a terminal state (synced or failed) for a run with
+	 * migrate_user_info enabled. Purely informational (an audit log entry)
+	 * - see UserInfoSyncJob's docblock for why this deliberately does NOT
+	 * drive the file pipeline's own phase transitions.
+	 */
+	public function onUserInfoSyncComplete(int $runId): void {
+		$this->eventLogger->log($runId, 'user_info_sync_completed', 'User info sync finished for all mapped users');
 	}
 
 	/**
@@ -716,6 +745,7 @@ class RunOrchestrator {
 		}
 
 		$this->fileMapper->deleteByRun($runId);
+		$this->resourceItemMapper->deleteByRun($runId);
 		$this->userMapMapper->deleteByRun($runId);
 		$this->eventLogger->deleteRunEvents($runId);
 		$this->runMapper->delete($run);

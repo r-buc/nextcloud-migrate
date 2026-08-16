@@ -83,6 +83,14 @@
 					checksums, which also catches rarer issues such as storage
 					corruption on the target after a successful upload.
 				</p>
+				<NcCheckboxRadioSwitch v-model="form.migrateUserInfo">
+					Also migrate user info (display name, email, quota, language, groups)
+				</NcCheckboxRadioSwitch>
+				<p class="settings-hint">
+					Syncs each mapped user's core account profile to the target via
+					the admin credential already configured above, independently of
+					and in parallel with the file transfer below.
+				</p>
 			</div>
 
 			<div class="ncm-actions">
@@ -103,6 +111,10 @@
 				<NcProgressBar size="medium" :value="status ? status.progressPercent : 0" />
 				<span class="ncm-percent">{{ status ? status.progressPercent : 0 }}%</span>
 			</div>
+
+			<p v-if="userInfoProgress" class="settings-hint">
+				User info sync: {{ userInfoProgress.synced }}/{{ userInfoProgress.total }} synced{{ userInfoProgress.failed ? `, ${userInfoProgress.failed} failed` : '' }}
+			</p>
 
 			<table v-if="status" class="grid ncm-users-table">
 				<thead>
@@ -285,6 +297,7 @@ export default {
 				collisionStrategy: 'rename',
 				expertMode: false,
 				skipVerification: false,
+				migrateUserInfo: false,
 			},
 			showAdvanced: false,
 			creating: false,
@@ -338,6 +351,12 @@ export default {
 		// states - only a run that finished WITH failures can be retried.
 		canRetryFailures() {
 			return !!this.run && ['completed_with_errors', 'failed'].includes(this.run.state)
+		},
+		// Only shown once user info migration was enabled for this run (see
+		// StatusController::buildResourceProgress() - the key is simply absent
+		// otherwise).
+		userInfoProgress() {
+			return this.status?.resourceProgress?.user_info || null
 		},
 	},
 	mounted() {
@@ -397,6 +416,7 @@ export default {
 				collisionStrategy: this.form.collisionStrategy,
 				userMappings,
 				skipVerification: this.form.skipVerification,
+				migrateUserInfo: this.form.migrateUserInfo,
 			}).then((run) => {
 				this.run = run
 				this.showAdvanced = false

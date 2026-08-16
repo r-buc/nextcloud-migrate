@@ -72,10 +72,77 @@ class ProvisioningClient {
 	 * @throws RemoteConnectionException
 	 */
 	public function resetUserPassword(RemoteInstance $instance, string $adminUserId, string $adminAppPassword, string $targetUserId, string $newPassword): void {
+		$this->editUserField($instance, $adminUserId, $adminAppPassword, $targetUserId, 'password', $newPassword);
+	}
+
+	/**
+	 * Fetches a target user's current profile fields - used by
+	 * UserInfoMigrationService to both re-check what's already on the
+	 * target and to verify a just-applied edit actually took effect.
+	 *
+	 * @return array{displayname:?string, email:?string, quota:?string, language:?string, groups:string[]}
+	 * @throws RemoteConnectionException
+	 */
+	public function getUser(RemoteInstance $instance, string $adminUserId, string $adminAppPassword, string $targetUserId): array {
+		$data = $this->request('GET', $instance, $adminUserId, $adminAppPassword, 'cloud/users/' . rawurlencode($targetUserId), []);
+
+		$userData = $data['ocs']['data'] ?? null;
+		if (!is_array($userData)) {
+			throw new RemoteConnectionException('Unexpected response fetching remote user details', 0);
+		}
+
+		// The provisioning API returns quota as a structure (free/used/
+		// total/relative/quota), not the human-readable string editUserField()
+		// accepts - not meaningfully comparable to the source's IUser::getQuota()
+		// format, so UserInfoMigrationService doesn't attempt to verify it.
+		return [
+			'displayname' => isset($userData['displayname']) ? (string)$userData['displayname'] : null,
+			'email' => isset($userData['email']) ? (string)$userData['email'] : null,
+			'quota' => isset($userData['quota']['quota']) ? (string)$userData['quota']['quota'] : null,
+			'language' => isset($userData['language']) ? (string)$userData['language'] : null,
+			'groups' => isset($userData['groups']) && is_array($userData['groups']) ? array_values(array_map('strval', $userData['groups'])) : [],
+		];
+	}
+
+	/**
+	 * Edits a single profile field of a target user (key ∈ displayname/
+	 * email/quota/language/password/phone/... - see the OCS Provisioning
+	 * API's editUser endpoint). Generalizes what resetUserPassword() does
+	 * for the 'password' key specifically.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function editUserField(RemoteInstance $instance, string $adminUserId, string $adminAppPassword, string $targetUserId, string $key, string $value): void {
 		$this->request('PUT', $instance, $adminUserId, $adminAppPassword, 'cloud/users/' . rawurlencode($targetUserId), [
-			'key' => 'password',
-			'value' => $newPassword,
+			'key' => $key,
+			'value' => $value,
 		]);
+	}
+
+	/**
+	 * Creates a group on the target instance if it doesn't already exist.
+	 * Idempotent: the provisioning API's "group already exists" statuscode
+	 * (102) is treated as success rather than an error, since
+	 * UserInfoMigrationService calls this unconditionally before adding a
+	 * user to a group it may not be the first mapped user to reference.
+	 *
+	 * @throws RemoteConnectionException
+	 */
+	public function ensureGroupExists(RemoteInstance $instance, string $adminUserId, string $adminAppPassword, string $groupId): void {
+		try {
+			$this->request('POST', $instance, $adminUserId, $adminAppPassword, 'cloud/groups', ['groupid' => $groupId]);
+		} catch (RemoteConnectionException $e) {
+			if ($e->getCode() !== 102) {
+				throw $e;
+			}
+		}
+	}
+
+	/**
+	 * @throws RemoteConnectionException
+	 */
+	public function addUserToGroup(RemoteInstance $instance, string $adminUserId, string $adminAppPassword, string $targetUserId, string $groupId): void {
+		$this->request('POST', $instance, $adminUserId, $adminAppPassword, 'cloud/users/' . rawurlencode($targetUserId) . '/groups', ['groupid' => $groupId]);
 	}
 
 	/**

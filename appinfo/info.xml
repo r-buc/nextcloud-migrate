@@ -3,14 +3,15 @@
       xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
     <id>nextcloud_migrate</id>
     <name>Nextcloud Migrate</name>
-    <summary>Migrate files 1:1 to a remote Nextcloud instance</summary>
+    <summary>Migrate files and account data 1:1 to a remote Nextcloud instance</summary>
     <description><![CDATA[
 Admin-driven tool to push a user's files and folder structure to a remote
 Nextcloud instance over WebDAV. Supports dry-run analysis, resumable
-background transfer, and per-file verification. v1 scope covers file
-content, folder structure, and modification time only.
+background transfer, and per-file verification. Optionally also migrates
+each mapped user's core account profile (displayname, email, quota,
+language, group memberships) via the OCS Provisioning API.
     ]]></description>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
     <licence>agpl</licence>
     <author>Nextcloud Migrate Contributors</author>
     <namespace>NextcloudMigrate</namespace>
@@ -28,6 +29,7 @@ content, folder structure, and modification time only.
         <job>OCA\NextcloudMigrate\BackgroundJob\FinalizeJob</job>
         <job>OCA\NextcloudMigrate\BackgroundJob\CleanupLocksJob</job>
         <job>OCA\NextcloudMigrate\BackgroundJob\SyncDiscoveryJob</job>
+        <job>OCA\NextcloudMigrate\BackgroundJob\UserInfoSyncJob</job>
     </background-jobs>
     <settings>
         <admin>OCA\NextcloudMigrate\Settings\AdminSettings</admin>

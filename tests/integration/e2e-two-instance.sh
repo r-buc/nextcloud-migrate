@@ -182,8 +182,8 @@ run_occ "$SRC" app:list | grep -q nextcloud_migrate || fail "app not listed as e
 pass "app enabled, schema created fresh"
 
 step "Creating local (source) test users + sample files"
-podman exec -u www-data -e OC_PASS=AliceTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env alice
-podman exec -u www-data -e OC_PASS=BobTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env bob
+podman exec -u www-data -e OC_PASS=AliceTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env --display-name="Alice Wonderland" alice
+podman exec -u www-data -e OC_PASS=BobTestPassphrase2026xyz "$SRC" php /var/www/html/occ user:add --password-from-env --display-name="Bob Builder" bob
 # Documents/ and Documents/shared.txt intentionally exist for BOTH users
 # with the SAME relative path but DIFFERENT content, to exercise
 # per-(run,user)-scoped uniqueness (a real bug once collided across users
@@ -209,6 +209,17 @@ podman exec "$SRC" sh -c '
 run_occ "$SRC" files:scan alice >/dev/null
 run_occ "$SRC" files:scan bob >/dev/null
 
+step "Setting source user profile fields (displayname/email/language/groups) for user info migration"
+run_occ "$SRC" user:setting alice settings email alice@example.com >/dev/null
+run_occ "$SRC" user:setting alice files quota "5 GB" >/dev/null
+run_occ "$SRC" user:setting alice core lang de >/dev/null
+run_occ "$SRC" group:add editors >/dev/null 2>&1 || true
+run_occ "$SRC" group:adduser editors alice >/dev/null
+run_occ "$SRC" user:setting bob settings email bob@example.com >/dev/null
+run_occ "$SRC" user:setting bob files quota "2 GB" >/dev/null
+run_occ "$SRC" user:setting bob core lang fr >/dev/null
+pass "source profile fields set for alice and bob"
+
 step "Pre-creating 'bob' on the target (to exercise auto-RESET), leaving 'alice' absent (to exercise auto-CREATE)"
 podman exec -u www-data -e OC_PASS=BobExistingTargetPassphrase2026 "$TGT" php /var/www/html/occ user:add --password-from-env bob
 
@@ -231,7 +242,7 @@ echo "$LOCAL_USERS" | grep -q '"id":"bob"' || fail "bob missing from /local-user
 pass "local user list includes alice and bob"
 
 step "Creating migration run (both users in default 'auto' mode)"
-RUN_BODY="$(api_call POST /runs '{"collisionStrategy":"rename","userMappings":[{"sourceUserId":"alice","targetUserId":"alice","mode":"auto"},{"sourceUserId":"bob","targetUserId":"bob","mode":"auto"}]}')"
+RUN_BODY="$(api_call POST /runs '{"collisionStrategy":"rename","userMappings":[{"sourceUserId":"alice","targetUserId":"alice","mode":"auto"},{"sourceUserId":"bob","targetUserId":"bob","mode":"auto"}],"migrateUserInfo":true}')"
 RUN_ID="$(echo "$RUN_BODY" | grep -oP '"id":\K[0-9]+' | head -1)"
 [[ -n "$RUN_ID" ]] || fail "createRun failed: $RUN_BODY"
 pass "run created (id=$RUN_ID) - alice account should now exist on target, bob's password should be reset"
@@ -318,6 +329,25 @@ for user in alice bob; do
 	fi
 done
 pass "ls -lR of Documents/ matches exactly between source and target for both users"
+
+step "Verifying user info migration (displayname/email/language/groups)"
+TGT_ALICE_OCS="$(podman exec "$TGT" sh -c "curl -s -u $ADMIN_USER:$TARGET_ADMIN_PASS -H 'OCS-APIRequest: true' 'http://localhost/ocs/v1.php/cloud/users/alice?format=json'")"
+echo "$TGT_ALICE_OCS" | grep -q '"displayname":"Alice Wonderland"' || fail "alice displayname not migrated: $TGT_ALICE_OCS"
+echo "$TGT_ALICE_OCS" | grep -q '"email":"alice@example.com"' || fail "alice email not migrated: $TGT_ALICE_OCS"
+echo "$TGT_ALICE_OCS" | grep -q '"language":"de"' || fail "alice language not migrated: $TGT_ALICE_OCS"
+echo "$TGT_ALICE_OCS" | grep -q '"editors"' || fail "alice group membership not migrated: $TGT_ALICE_OCS"
+pass "alice's user info (displayname/email/language/groups) migrated to target"
+
+TGT_BOB_OCS="$(podman exec "$TGT" sh -c "curl -s -u $ADMIN_USER:$TARGET_ADMIN_PASS -H 'OCS-APIRequest: true' 'http://localhost/ocs/v1.php/cloud/users/bob?format=json'")"
+echo "$TGT_BOB_OCS" | grep -q '"displayname":"Bob Builder"' || fail "bob displayname not migrated: $TGT_BOB_OCS"
+echo "$TGT_BOB_OCS" | grep -q '"email":"bob@example.com"' || fail "bob email not migrated: $TGT_BOB_OCS"
+echo "$TGT_BOB_OCS" | grep -q '"language":"fr"' || fail "bob language not migrated: $TGT_BOB_OCS"
+pass "bob's user info (displayname/email/language) migrated to target"
+
+step "Verifying user info sync events were recorded"
+EVENTS_BODY="$(api_get "/runs/$RUN_ID/events")"
+echo "$EVENTS_BODY" | grep -q 'user_info_sync_completed' || fail "user_info_sync_completed event not found: $EVENTS_BODY"
+pass "user_info_sync_completed event recorded"
 
 step "Cleaning up"
 podman rm -f -v "$SRC" "$TGT" >/dev/null 2>&1 || true
